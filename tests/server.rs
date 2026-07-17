@@ -89,11 +89,28 @@ async fn models_endpoint_returns_merged_catalog() {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap();
+    assert_eq!(
+        body.as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["data"]
+    );
     let data = body["data"].as_array().unwrap();
     assert!(data.iter().any(|entry| entry["id"] == "claude-sonnet-5"));
-    assert!(data.iter().any(|entry| entry["id"] == "gpt-5"));
-    assert!(data.iter().any(|entry| entry["id"] == "gpt-5-mini"));
-    assert!(data.iter().any(|entry| entry["id"] == "gpt-5-codex"));
+    assert!(data.iter().any(|entry| entry["id"] == "claude-gpt-5"));
+    assert!(data.iter().any(|entry| entry["id"] == "claude-gpt-5-mini"));
+    assert!(data.iter().any(|entry| entry["id"] == "claude-gpt-5-codex"));
+    assert!(data.iter().any(|entry| entry["id"] == "claude-gpt-5-6-sol"));
+    assert!(data.iter().all(|entry| entry.get("type").is_none()));
+    assert!(data.iter().all(|entry| entry.get("created_at").is_none()));
+    assert!(data.iter().all(|entry| {
+        entry["id"]
+            .as_str()
+            .map(|id| id.starts_with("claude") || id.starts_with("anthropic"))
+            .unwrap_or(false)
+    }));
 }
 
 #[tokio::test]

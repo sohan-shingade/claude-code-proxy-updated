@@ -124,36 +124,41 @@ async fn handler_messages(State(state): State<Arc<AppState>>, req: Request<Body>
     dispatch_request(state, req, false).await
 }
 
-async fn handler_models(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+async fn handler_models(
+    State(state): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Json<serde_json::Value> {
+    let log = create_logger("server");
+    let auth_mode = if req.headers().contains_key("authorization") {
+        "authorization"
+    } else if req.headers().contains_key("x-api-key") {
+        "x-api-key"
+    } else {
+        "none"
+    };
+    log.info(
+        "model_discovery_request",
+        Some(serde_json::Map::from_iter([
+            ("path".to_string(), json!(req.uri().path())),
+            (
+                "query".to_string(),
+                json!(redacted_query(req.uri())),
+            ),
+            ("authMode".to_string(), json!(auth_mode)),
+        ])),
+    );
     let models = state
         .registry
         .catalog_models()
         .into_iter()
         .map(|(id, provider)| {
             json!({
-                "type": "model",
                 "id": id,
                 "display_name": provider_display_name(&provider, &id),
-                "created_at": "2026-01-01T00:00:00Z",
             })
         })
         .collect::<Vec<_>>();
-    let first_id = models
-        .first()
-        .and_then(|model| model.get("id"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let last_id = models
-        .last()
-        .and_then(|model| model.get("id"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    Json(json!({
-        "data": models,
-        "has_more": false,
-        "first_id": first_id,
-        "last_id": last_id,
-    }))
+    Json(json!({ "data": models }))
 }
 
 async fn handler_count_tokens(State(state): State<Arc<AppState>>, req: Request<Body>) -> Response {
@@ -521,11 +526,39 @@ async fn dispatch_request(
 fn provider_display_name(provider: &str, id: &str) -> String {
     match provider {
         "anthropic" => id.to_string(),
-        "codex" => format!("{id} (Codex)"),
+        "codex" => display_codex_name(id),
         "kimi" => format!("{id} (Kimi)"),
         "grok" => format!("{id} (Grok)"),
         "cursor" => format!("{id} (Cursor)"),
         _ => id.to_string(),
+    }
+}
+
+fn display_codex_name(id: &str) -> String {
+    let model = normalize_incoming_model(id);
+    match model.as_str() {
+        "gpt-5" => "GPT-5 (Codex gpt-5.5)".to_string(),
+        "gpt-5-mini" => "GPT-5 Mini (Codex gpt-5.4-mini)".to_string(),
+        "gpt-5-codex" => "GPT-5 Codex (Codex gpt-5.3-codex)".to_string(),
+        "gpt-5.2" => "GPT-5.2".to_string(),
+        "gpt-5.2-fast" => "GPT-5.2 Fast".to_string(),
+        "gpt-5.3-codex" => "GPT-5.3 Codex".to_string(),
+        "gpt-5.3-codex-fast" => "GPT-5.3 Codex Fast".to_string(),
+        "gpt-5.3-codex-spark" => "GPT-5.3 Codex Spark".to_string(),
+        "gpt-5.3-codex-spark-fast" => "GPT-5.3 Codex Spark Fast".to_string(),
+        "gpt-5.4" => "GPT-5.4".to_string(),
+        "gpt-5.4-fast" => "GPT-5.4 Fast".to_string(),
+        "gpt-5.4-mini" => "GPT-5.4 Mini".to_string(),
+        "gpt-5.4-mini-fast" => "GPT-5.4 Mini Fast".to_string(),
+        "gpt-5.5" => "GPT-5.5".to_string(),
+        "gpt-5.5-fast" => "GPT-5.5 Fast".to_string(),
+        "gpt-5.6-luna" => "GPT-5.6 Luna".to_string(),
+        "gpt-5.6-luna-fast" => "GPT-5.6 Luna Fast".to_string(),
+        "gpt-5.6-sol" => "GPT-5.6 Sol".to_string(),
+        "gpt-5.6-sol-fast" => "GPT-5.6 Sol Fast".to_string(),
+        "gpt-5.6-terra" => "GPT-5.6 Terra".to_string(),
+        "gpt-5.6-terra-fast" => "GPT-5.6 Terra Fast".to_string(),
+        _ => model,
     }
 }
 

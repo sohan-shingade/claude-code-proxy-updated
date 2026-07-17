@@ -168,10 +168,16 @@ impl Registry {
     }
 
     pub fn catalog_models(&self) -> Vec<(String, String)> {
-        self.all_supported_models()
+        let mut models = self
+            .all_supported_models()
             .into_iter()
             .filter(|(model, _)| !ANTHROPIC_STYLE_ALIASES.contains(&model.as_str()))
-            .collect()
+            .map(|(model, provider)| (discovery_model_id(&provider, &model), provider))
+            .filter(|(id, _)| is_gateway_discovery_id(id))
+            .collect::<Vec<_>>();
+        models.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        models.dedup();
+        models
     }
 
     pub fn provider_for_model(
@@ -180,6 +186,9 @@ impl Registry {
         session_affinity: Option<&AliasProvider>,
     ) -> Option<Arc<dyn Provider>> {
         let normalized = normalize_incoming_model(raw_model);
+        if is_codex_discovery_model(&normalized) {
+            return self.handlers.get("codex").cloned();
+        }
         if self.anthropic_passthrough_enabled && normalized.starts_with("claude-") {
             return self.handlers.get("anthropic").cloned();
         }
@@ -213,10 +222,12 @@ impl Registry {
 
 pub fn normalize_incoming_model(model: &str) -> String {
     let suffix = "[1m]";
-    if model.len() >= suffix.len() && model.to_ascii_lowercase().ends_with(suffix) {
-        return model[..model.len() - suffix.len()].to_string();
-    }
-    model.to_string()
+    let stripped = if model.len() >= suffix.len() && model.to_ascii_lowercase().ends_with(suffix) {
+        &model[..model.len() - suffix.len()]
+    } else {
+        model
+    };
+    normalize_gateway_discovery_model(stripped)
 }
 
 pub fn is_anthropic_alias(model: &str) -> bool {
@@ -362,6 +373,72 @@ fn build_cursor_models() -> Vec<String> {
     out
 }
 
+fn discovery_model_id(provider: &str, model: &str) -> String {
+    if provider == "codex" {
+        return codex_discovery_model_id(model);
+    }
+    model.to_string()
+}
+
+fn normalize_gateway_discovery_model(model: &str) -> String {
+    if let Some(raw) = codex_discovery_model_target(model) {
+        return raw.to_string();
+    }
+    model.to_string()
+}
+
+fn is_codex_discovery_model(model: &str) -> bool {
+    codex_discovery_model_target(model).is_some()
+}
+
+fn is_gateway_discovery_id(model: &str) -> bool {
+    model.starts_with("claude") || model.starts_with("anthropic")
+}
+
+fn codex_discovery_model_id(model: &str) -> String {
+    match model {
+        "gpt-5" => "claude-gpt-5".to_string(),
+        "gpt-5-mini" => "claude-gpt-5-mini".to_string(),
+        "gpt-5-codex" => "claude-gpt-5-codex".to_string(),
+        _ => format!("claude-{}", model.replace('.', "-")),
+    }
+}
+
+fn codex_discovery_model_target(model: &str) -> Option<&'static str> {
+    match model {
+        "claude-gpt-5" => Some("gpt-5"),
+        "claude-gpt-5-mini" => Some("gpt-5-mini"),
+        "claude-gpt-5-codex" => Some("gpt-5-codex"),
+        "claude-gpt-5-2" | "claude-gpt-5.2" => Some("gpt-5.2"),
+        "claude-gpt-5-2-fast" | "claude-gpt-5.2-fast" => Some("gpt-5.2-fast"),
+        "claude-gpt-5-3-codex" | "claude-gpt-5.3-codex" => Some("gpt-5.3-codex"),
+        "claude-gpt-5-3-codex-fast" | "claude-gpt-5.3-codex-fast" => {
+            Some("gpt-5.3-codex-fast")
+        }
+        "claude-gpt-5-3-codex-spark" | "claude-gpt-5.3-codex-spark" => {
+            Some("gpt-5.3-codex-spark")
+        }
+        "claude-gpt-5-3-codex-spark-fast" | "claude-gpt-5.3-codex-spark-fast" => {
+            Some("gpt-5.3-codex-spark-fast")
+        }
+        "claude-gpt-5-4" | "claude-gpt-5.4" => Some("gpt-5.4"),
+        "claude-gpt-5-4-fast" | "claude-gpt-5.4-fast" => Some("gpt-5.4-fast"),
+        "claude-gpt-5-4-mini" | "claude-gpt-5.4-mini" => Some("gpt-5.4-mini"),
+        "claude-gpt-5-4-mini-fast" | "claude-gpt-5.4-mini-fast" => Some("gpt-5.4-mini-fast"),
+        "claude-gpt-5-5" | "claude-gpt-5.5" => Some("gpt-5.5"),
+        "claude-gpt-5-5-fast" | "claude-gpt-5.5-fast" => Some("gpt-5.5-fast"),
+        "claude-gpt-5-6-luna" | "claude-gpt-5.6-luna" => Some("gpt-5.6-luna"),
+        "claude-gpt-5-6-luna-fast" | "claude-gpt-5.6-luna-fast" => Some("gpt-5.6-luna-fast"),
+        "claude-gpt-5-6-sol" | "claude-gpt-5.6-sol" => Some("gpt-5.6-sol"),
+        "claude-gpt-5-6-sol-fast" | "claude-gpt-5.6-sol-fast" => Some("gpt-5.6-sol-fast"),
+        "claude-gpt-5-6-terra" | "claude-gpt-5.6-terra" => Some("gpt-5.6-terra"),
+        "claude-gpt-5-6-terra-fast" | "claude-gpt-5.6-terra-fast" => {
+            Some("gpt-5.6-terra-fast")
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -370,6 +447,8 @@ mod tests {
     fn normalize_model_trims_hint() {
         assert_eq!(normalize_incoming_model("gpt-5.4-fast[1m]"), "gpt-5.4-fast");
         assert_eq!(normalize_incoming_model("gpt-5.4-fast"), "gpt-5.4-fast");
+        assert_eq!(normalize_incoming_model("claude-gpt-5[1m]"), "gpt-5");
+        assert_eq!(normalize_incoming_model("claude-gpt-5-6-sol"), "gpt-5.6-sol");
     }
 
     #[test]
@@ -404,6 +483,23 @@ mod tests {
         let p = registry.provider_for_model("claude-opus-4-8", None);
         assert!(p.is_some());
         assert_eq!(p.expect("provider").name(), "anthropic");
+    }
+
+    #[test]
+    fn claude_gpt_picker_models_route_to_codex() {
+        let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, true);
+        let p = registry.provider_for_model("claude-gpt-5-mini", None);
+        assert!(p.is_some());
+        assert_eq!(p.expect("provider").name(), "codex");
+    }
+
+    #[test]
+    fn codex_catalog_uses_hyphenized_picker_ids() {
+        let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, true);
+        let catalog = registry.catalog_models();
+        assert!(catalog.iter().any(|(id, _)| id == "claude-gpt-5-6-sol"));
+        assert!(catalog.iter().any(|(id, _)| id == "claude-gpt-5-mini"));
+        assert!(!catalog.iter().any(|(id, _)| id == "claude-gpt-5.6-sol"));
     }
 
     #[test]
