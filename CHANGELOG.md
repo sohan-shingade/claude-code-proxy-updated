@@ -1,5 +1,76 @@
 # Changelog
 
+## v0.1.22 (2026-07-17)
+
+- Added optional inbound authentication with `CCP_PROXY_AUTH_TOKEN` for all
+  `/v1/*` routes via Bearer or `x-api-key`, while keeping `/healthz` public.
+  Non-loopback binds are now refused without a token, and request bodies are
+  capped at 16 MiB.
+- Picker auto-seeding now derives the cached base URL from the effective bind
+  address and port instead of always assuming a fixed host. `picker.baseUrl` /
+  `CCP_PICKER_BASE_URL` provides the exact URL for hostnames and reverse
+  proxies.
+- Fixed Rust platform-name matching for Windows (`windows`) and macOS (`macos`),
+  while retaining the legacy `win32` and `darwin` aliases used in tests and
+  integrations.
+- Public install, release, and Nix metadata now target this maintained fork,
+  with explicit upstream attribution. Unsupported Homebrew tap promotion was
+  removed.
+- Added baseline fmt, Clippy, and test CI plus `SECURITY.md` and
+  `CONTRIBUTING.md`; corrected stale build-tool, token-count, history, and
+  endpoint documentation.
+
+- `serve` now seeds Claude Code's `/model` picker cache automatically at
+  startup, so gateway models self-heal if the cache was clobbered by an older
+  proxy build or an Anthropic-only session. Target directories come from
+  `picker.claudeConfigDirs` in config.json (or the
+  `CCP_PICKER_CLAUDE_CONFIG_DIRS` env override, colon-separated), falling back
+  to `$CLAUDE_CONFIG_DIR`, then `~/.claude`. Missing directories are skipped,
+  never created. Disable with `picker.seedOnStart: false` or
+  `CCP_PICKER_SEED_ON_START=0`.
+- Picker cache writes (both auto-seed and `seed-picker`) are now atomic: the
+  JSON is written to a same-directory temp file with mode 0600 and renamed
+  into place. Claude Code reads the cache at most once per session and
+  memoizes a parse failure as "no gateway models", so a session starting
+  mid-write could previously lose every gateway model until restart.
+  Seeding also skips the write entirely when the cache already matches,
+  keeping mtimes stable.
+- Claude Code's `/model` picker now reliably lists this proxy's catalog.
+  Discovery requires `ANTHROPIC_AUTH_TOKEN` (or an API key) to be set, so the
+  startup banner, TUI setup text, and README now export
+  `ANTHROPIC_AUTH_TOKEN=unused` alongside
+  `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`.
+- Codex's synthetic `claude-gpt-*` picker ids are now derived from the same
+  canonical model list used everywhere else in the registry, instead of a
+  separate hardcoded id mapping that could drift out of sync.
+- Fixed a bug where ids that were already in `claude-*` form could get
+  prefixed a second time in the `/v1/models` catalog (`claude-claude-...`).
+- `claude-*` model ids now route to the configured alias provider (Codex,
+  Kimi, ...) when `CCP_ANTHROPIC_PASSTHROUGH` is disabled, instead of only
+  resolving correctly with passthrough enabled.
+- `/v1/models` responses are back to the full Anthropic list-response shape
+  (`type`, `created_at`, `has_more`, `first_id`, `last_id`) that Claude Code's
+  gateway discovery expects.
+- Setting `ANTHROPIC_AUTH_TOKEN` (or an API key) takes precedence over a
+  claude.ai login, so Claude Code disables claude.ai connectors for the
+  session and prints a warning about it. This is enforced by Claude Code
+  itself, with no proxy-side override, so it's now documented as a tradeoff
+  of the `/model` gateway-discovery recipe.
+- New `seed-picker` subcommand writes the proxy's model catalog directly to
+  Claude Code's `/model` picker cache
+  (`<config-dir>/cache/gateway-models.json`), so the picker can be populated
+  without setting `ANTHROPIC_AUTH_TOKEN` at all — keeping claude.ai login and
+  connectors intact. `--config-dir` and `--base-url` override the config
+  directory and the base URL recorded in the cache; the recorded URL must
+  match `ANTHROPIC_BASE_URL` exactly, and the cache needs re-seeding after
+  catalog changes.
+- GPT-5.6 setup instructions (banner, TUI, `seed-picker`, README) now include
+  the `[1m]` hint and `CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000` for the picker
+  ids too (`claude-gpt-5-6-sol[1m]`, `claude-gpt-5-6-luna[1m]`), since the
+  ChatGPT-subscription Codex backend caps sessions at 272K input regardless
+  of GPT-5.6's larger metered-API context, and Claude Code otherwise assumes
+  200K for unrecognized `claude-*` ids.
+
 ## v0.1.21 (2026-07-15)
 
 - The monitor shows session token activity trends at common terminal widths,

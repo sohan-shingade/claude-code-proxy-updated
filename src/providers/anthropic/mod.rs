@@ -267,8 +267,8 @@ fn is_placeholder_auth(value: &HeaderValue) -> bool {
 }
 
 async fn response_from_upstream_buffered(upstream: reqwest::Response) -> Response {
-    let status = StatusCode::from_u16(upstream.status().as_u16())
-        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut builder = Response::builder().status(status);
     for (name, value) in upstream.headers() {
         builder = builder.header(name, value);
@@ -293,15 +293,13 @@ async fn response_from_upstream_buffered(upstream: reqwest::Response) -> Respons
 }
 
 fn response_from_upstream_stream(upstream: reqwest::Response) -> Response {
-    let status = StatusCode::from_u16(upstream.status().as_u16())
-        .unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut builder = Response::builder().status(status);
     for (name, value) in upstream.headers() {
         builder = builder.header(name, value);
     }
-    let stream = upstream
-        .bytes_stream()
-        .map_err(std::io::Error::other);
+    let stream = upstream.bytes_stream().map_err(std::io::Error::other);
     builder
         .body(Body::from_stream(stream))
         .unwrap_or_else(|err| {
@@ -333,5 +331,9 @@ fn read_claude_credentials_access_token() -> Option<String> {
 
 fn default_claude_credentials_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".claude").join(".credentials.json"))
+    Some(
+        PathBuf::from(home)
+            .join(".claude")
+            .join(".credentials.json"),
+    )
 }

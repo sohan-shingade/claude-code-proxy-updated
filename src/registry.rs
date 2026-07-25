@@ -6,8 +6,8 @@ use crate::{
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use axum::{http::StatusCode, response::Response};
-use std::collections::{BTreeMap, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, LazyLock};
 
 pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &["haiku", "sonnet", "opus", "fable"];
 
@@ -176,7 +176,7 @@ impl Registry {
             .filter(|(id, _)| is_gateway_discovery_id(id))
             .collect::<Vec<_>>();
         models.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
-        models.dedup();
+        models.dedup_by(|left, right| left.0 == right.0);
         models
     }
 
@@ -192,7 +192,7 @@ impl Registry {
         if self.anthropic_passthrough_enabled && normalized.starts_with("claude-") {
             return self.handlers.get("anthropic").cloned();
         }
-        if is_anthropic_alias(&normalized) {
+        if is_anthropic_alias(&normalized) || ANTHROPIC_MODELS.contains(&normalized.as_str()) {
             let target = session_affinity.unwrap_or(&self.alias_provider);
             return self.handlers.get(target.as_str()).cloned();
         }
@@ -396,47 +396,25 @@ fn is_gateway_discovery_id(model: &str) -> bool {
 }
 
 fn codex_discovery_model_id(model: &str) -> String {
-    match model {
-        "gpt-5" => "claude-gpt-5".to_string(),
-        "gpt-5-mini" => "claude-gpt-5-mini".to_string(),
-        "gpt-5-codex" => "claude-gpt-5-codex".to_string(),
-        _ => format!("claude-{}", model.replace('.', "-")),
+    if model.starts_with("claude") || model.starts_with("anthropic") {
+        return model.to_string();
     }
+    format!("claude-{}", model.replace('.', "-"))
 }
 
+/// Reverse of `codex_discovery_model_id`, derived from the same model lists so
+/// the two directions cannot drift. Accepts both the hyphenized picker id
+/// (`claude-gpt-5-6-sol`) and the dotted spelling (`claude-gpt-5.6-sol`).
 fn codex_discovery_model_target(model: &str) -> Option<&'static str> {
-    match model {
-        "claude-gpt-5" => Some("gpt-5"),
-        "claude-gpt-5-mini" => Some("gpt-5-mini"),
-        "claude-gpt-5-codex" => Some("gpt-5-codex"),
-        "claude-gpt-5-2" | "claude-gpt-5.2" => Some("gpt-5.2"),
-        "claude-gpt-5-2-fast" | "claude-gpt-5.2-fast" => Some("gpt-5.2-fast"),
-        "claude-gpt-5-3-codex" | "claude-gpt-5.3-codex" => Some("gpt-5.3-codex"),
-        "claude-gpt-5-3-codex-fast" | "claude-gpt-5.3-codex-fast" => {
-            Some("gpt-5.3-codex-fast")
+    static TARGETS: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+        let mut map = HashMap::new();
+        for upstream in expand_codex_models() {
+            map.insert(codex_discovery_model_id(&upstream), upstream.clone());
+            map.insert(format!("claude-{upstream}"), upstream);
         }
-        "claude-gpt-5-3-codex-spark" | "claude-gpt-5.3-codex-spark" => {
-            Some("gpt-5.3-codex-spark")
-        }
-        "claude-gpt-5-3-codex-spark-fast" | "claude-gpt-5.3-codex-spark-fast" => {
-            Some("gpt-5.3-codex-spark-fast")
-        }
-        "claude-gpt-5-4" | "claude-gpt-5.4" => Some("gpt-5.4"),
-        "claude-gpt-5-4-fast" | "claude-gpt-5.4-fast" => Some("gpt-5.4-fast"),
-        "claude-gpt-5-4-mini" | "claude-gpt-5.4-mini" => Some("gpt-5.4-mini"),
-        "claude-gpt-5-4-mini-fast" | "claude-gpt-5.4-mini-fast" => Some("gpt-5.4-mini-fast"),
-        "claude-gpt-5-5" | "claude-gpt-5.5" => Some("gpt-5.5"),
-        "claude-gpt-5-5-fast" | "claude-gpt-5.5-fast" => Some("gpt-5.5-fast"),
-        "claude-gpt-5-6-luna" | "claude-gpt-5.6-luna" => Some("gpt-5.6-luna"),
-        "claude-gpt-5-6-luna-fast" | "claude-gpt-5.6-luna-fast" => Some("gpt-5.6-luna-fast"),
-        "claude-gpt-5-6-sol" | "claude-gpt-5.6-sol" => Some("gpt-5.6-sol"),
-        "claude-gpt-5-6-sol-fast" | "claude-gpt-5.6-sol-fast" => Some("gpt-5.6-sol-fast"),
-        "claude-gpt-5-6-terra" | "claude-gpt-5.6-terra" => Some("gpt-5.6-terra"),
-        "claude-gpt-5-6-terra-fast" | "claude-gpt-5.6-terra-fast" => {
-            Some("gpt-5.6-terra-fast")
-        }
-        _ => None,
-    }
+        map
+    });
+    TARGETS.get(model).map(String::as_str)
 }
 
 #[cfg(test)]
@@ -448,7 +426,30 @@ mod tests {
         assert_eq!(normalize_incoming_model("gpt-5.4-fast[1m]"), "gpt-5.4-fast");
         assert_eq!(normalize_incoming_model("gpt-5.4-fast"), "gpt-5.4-fast");
         assert_eq!(normalize_incoming_model("claude-gpt-5[1m]"), "gpt-5");
-        assert_eq!(normalize_incoming_model("claude-gpt-5-6-sol"), "gpt-5.6-sol");
+        assert_eq!(
+            normalize_incoming_model("claude-gpt-5-6-sol"),
+            "gpt-5.6-sol"
+        );
+        assert_eq!(
+            normalize_incoming_model("claude-gpt-5.6-sol"),
+            "gpt-5.6-sol"
+        );
+        assert_eq!(
+            normalize_incoming_model("claude-gpt-5-3-codex-spark-fast"),
+            "gpt-5.3-codex-spark-fast"
+        );
+    }
+
+    #[test]
+    fn every_codex_model_round_trips_through_discovery_ids() {
+        for model in expand_codex_models() {
+            let picker_id = codex_discovery_model_id(&model);
+            assert!(
+                picker_id.starts_with("claude"),
+                "{picker_id} would be filtered out of the /model picker"
+            );
+            assert_eq!(normalize_incoming_model(&picker_id), model);
+        }
     }
 
     #[test]
@@ -500,6 +501,31 @@ mod tests {
         assert!(catalog.iter().any(|(id, _)| id == "claude-gpt-5-6-sol"));
         assert!(catalog.iter().any(|(id, _)| id == "claude-gpt-5-mini"));
         assert!(!catalog.iter().any(|(id, _)| id == "claude-gpt-5.6-sol"));
+    }
+
+    #[test]
+    fn catalog_never_double_prefixes_anthropic_ids() {
+        for passthrough in [false, true] {
+            let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, passthrough);
+            let catalog = registry.catalog_models();
+            assert!(
+                catalog
+                    .iter()
+                    .all(|(id, _)| !id.starts_with("claude-claude-")),
+                "passthrough={passthrough}: {catalog:?}"
+            );
+            assert!(catalog.iter().any(|(id, _)| id == "claude-sonnet-5"));
+        }
+    }
+
+    #[test]
+    fn catalog_ids_are_unique() {
+        let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, true);
+        let catalog = registry.catalog_models();
+        let mut ids: Vec<_> = catalog.iter().map(|(id, _)| id.clone()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), catalog.len());
     }
 
     #[test]

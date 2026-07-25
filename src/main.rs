@@ -3,7 +3,7 @@ use clap::{ArgAction, Parser, Subcommand};
 use claude_code_proxy::{
     config, logging,
     monitor::MonitorHandle,
-    paths,
+    paths, picker,
     registry::{ANTHROPIC_STYLE_ALIASES, Registry},
     server::{self, ServerConfig},
     tui::{self, MonitorExit, MonitorUiConfig},
@@ -41,6 +41,17 @@ enum Commands {
     Models {
         #[arg(long)]
         full: bool,
+    },
+    /// Write Claude Code's /model picker cache so gateway models appear
+    /// without setting ANTHROPIC_AUTH_TOKEN (keeps claude.ai connectors)
+    SeedPicker {
+        /// Claude Code config dir (default: $CLAUDE_CONFIG_DIR or ~/.claude)
+        #[arg(long)]
+        config_dir: Option<std::path::PathBuf>,
+        /// Must exactly match the ANTHROPIC_BASE_URL Claude Code runs with
+        /// (default: picker override or effective listener URL)
+        #[arg(long)]
+        base_url: Option<String>,
     },
     Codex {
         #[command(subcommand)]
@@ -89,6 +100,7 @@ fn main() -> Result<()> {
         Commands::Serve { port, no_monitor } => {
             let bind_address = config::bind_address();
             let effective_port = port.unwrap_or_else(config::port);
+            server::validate_bind_auth(&bind_address, config::proxy_auth_token().as_deref())?;
             let registry = Registry::with_default_alias();
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -153,11 +165,71 @@ fn main() -> Result<()> {
             print_models(&Registry::with_default_alias(), full);
             Ok(())
         }
+        Commands::SeedPicker {
+            config_dir,
+            base_url,
+        } => seed_picker_cache(config_dir, base_url),
         Commands::Codex { command } => run_provider_cli("codex", command),
         Commands::Kimi { command } => run_provider_cli("kimi", command),
         Commands::Cursor { command } => run_provider_cli("cursor", command),
         Commands::Grok { command } => run_provider_cli("grok", command),
     }
+}
+
+fn seed_picker_cache(
+    config_dir: Option<std::path::PathBuf>,
+    base_url: Option<String>,
+) -> Result<()> {
+    let dirs = match config_dir {
+        Some(dir) => vec![dir],
+        None => picker::claude_config_dirs(),
+    };
+    if dirs.is_empty() {
+        anyhow::bail!("cannot determine Claude Code config dir; pass --config-dir");
+    }
+    let base_url = base_url
+        .unwrap_or_else(|| config::picker_base_url(&config::bind_address(), config::port()));
+    let fetched_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    let registry = Registry::with_default_alias();
+    for dir in &dirs {
+        let outcome = picker::seed_one(&registry, &base_url, dir, fetched_at_ms);
+        match outcome.result? {
+            picker::SeedResult::Written { models } => {
+                println!("Wrote {models} models to {}", outcome.cache_file.display());
+            }
+            picker::SeedResult::Unchanged { models } => {
+                println!(
+                    "Already up to date ({models} models): {}",
+                    outcome.cache_file.display()
+                );
+            }
+            picker::SeedResult::SkippedMissingDir => {
+                anyhow::bail!(
+                    "{} does not exist — is Claude Code installed? Pass --config-dir to override",
+                    dir.display()
+                );
+            }
+        }
+    }
+    println!();
+    println!("Launch Claude Code with (no ANTHROPIC_AUTH_TOKEN, keeps claude.ai connectors):");
+    println!("  export ANTHROPIC_BASE_URL=\"{base_url}\"");
+    println!("  export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1");
+    println!();
+    println!("For GPT-first sessions, also raise the context accounting to the Codex");
+    println!("backend's real 272K input cap (the [1m] hint lifts Claude Code's 200K");
+    println!("fallback; the compact window keeps sessions under the upstream limit):");
+    println!("  export ANTHROPIC_MODEL=\"claude-gpt-5-6-sol[1m]\"");
+    println!("  export ANTHROPIC_SMALL_FAST_MODEL=\"claude-gpt-5-6-luna[1m]\"");
+    println!("  export CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000");
+    println!();
+    println!("ANTHROPIC_BASE_URL must match the seeded value exactly, or the picker");
+    println!("ignores the cache. Restart Claude Code to pick up changes, and re-run");
+    println!("this command after model catalog updates.");
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,9 +341,16 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     println!();
     println!("Configure Claude Code (pick a model from above):");
     println!("  export ANTHROPIC_BASE_URL=\"http://localhost:{port}\"");
+    println!("  export ANTHROPIC_AUTH_TOKEN=\"unused\"");
     println!("  export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1");
-    println!("  export ANTHROPIC_MODEL=\"claude-gpt-5-6-sol\"");
-    println!("  export ANTHROPIC_SMALL_FAST_MODEL=\"claude-gpt-5-6-luna\"");
+    println!("  export ANTHROPIC_MODEL=\"claude-gpt-5-6-sol[1m]\"");
+    println!("  export ANTHROPIC_SMALL_FAST_MODEL=\"claude-gpt-5-6-luna[1m]\"");
+    println!("  export CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000");
+    println!();
+    println!("Claude Code fetches /v1/models once at startup, so launch it after the");
+    println!("proxy is running; Codex models then appear in /model as \"From gateway\".");
+    println!("[1m] raises Claude Code's assumed window past its 200K fallback; the");
+    println!("272000 compact window stays under the Codex backend's real 272K cap.");
 }
 
 #[allow(dead_code)]

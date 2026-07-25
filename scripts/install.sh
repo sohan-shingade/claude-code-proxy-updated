@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # claude-code-proxy installation script
-# Usage: curl -fsSL https://raw.githubusercontent.com/raine/claude-code-proxy/main/scripts/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/sohan-shingade/claude-code-proxy-updated/main/scripts/install.sh | bash
 #
 # Environment variables:
 #   CLAUDE_CODE_PROXY_VERSION      - Pin a specific version (e.g., v0.1.0)
@@ -15,7 +15,7 @@
 set -e
 
 BIN_NAME="claude-code-proxy"
-REPO="raine/claude-code-proxy"
+REPO="sohan-shingade/claude-code-proxy-updated"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -38,7 +38,7 @@ detect_platform() {
 		log_error "Unsupported operating system: $(uname -s)"
 		echo ""
 		echo "${BIN_NAME} supports macOS and Linux."
-		echo "For other platforms, build from source with Bun:"
+		echo "For other platforms, build from source with Cargo:"
 		echo "  git clone https://github.com/${REPO}"
 		echo ""
 		exit 1
@@ -52,7 +52,7 @@ detect_platform() {
 		log_error "Unsupported architecture: $(uname -m)"
 		echo ""
 		echo "${BIN_NAME} prebuilt binaries are available for amd64 and arm64."
-		echo "For other architectures, build from source with Bun:"
+		echo "For other architectures, build from source with Cargo:"
 		echo "  git clone https://github.com/${REPO}"
 		echo ""
 		exit 1

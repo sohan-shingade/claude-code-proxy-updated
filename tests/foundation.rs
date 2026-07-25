@@ -75,6 +75,16 @@ fn path_resolvers_cover_platform_rules() {
     );
 
     let deps = DirResolverEnv {
+        platform: "macos".to_string(),
+        home: "/home/u".into(),
+        env: HashMap::from([("XDG_CONFIG_HOME".into(), "/x".into())]),
+    };
+    assert_eq!(
+        paths::resolve_config_dir(&deps).to_string_lossy(),
+        "/home/u/.config/claude-code-proxy"
+    );
+
+    let deps = DirResolverEnv {
         platform: "linux".to_string(),
         home: "/home/u".into(),
         env: HashMap::from([("XDG_CONFIG_HOME".into(), "/x".into())]),
@@ -85,13 +95,22 @@ fn path_resolvers_cover_platform_rules() {
     );
 
     let deps = DirResolverEnv {
-        platform: "win32".to_string(),
+        platform: "windows".to_string(),
         home: "C:/Users/u".into(),
         env: HashMap::from([("APPDATA".into(), "C:/Users/u/AppData/Roaming".into())]),
     };
     assert_eq!(
         paths::resolve_config_dir(&deps).to_string_lossy(),
         "C:/Users/u/AppData/Roaming/claude-code-proxy"
+    );
+    assert_eq!(
+        paths::resolve_state_dir(&DirResolverEnv {
+            platform: "windows".to_string(),
+            home: "C:/Users/u".into(),
+            env: HashMap::from([("LOCALAPPDATA".into(), "C:/Users/u/AppData/Local".into())]),
+        })
+        .to_string_lossy(),
+        "C:/Users/u/AppData/Local/claude-code-proxy"
     );
 }
 

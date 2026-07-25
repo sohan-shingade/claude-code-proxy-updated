@@ -25,7 +25,7 @@ pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
         return Path::new(override_dir).to_path_buf();
     }
 
-    if deps.platform == "win32" {
+    if is_windows(&deps.platform) {
         let appdata = deps
             .env
             .get("APPDATA")
@@ -34,7 +34,7 @@ pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
         return join_with_sep(&appdata, &["claude-code-proxy"], true);
     }
 
-    if deps.platform == "darwin" {
+    if is_macos(&deps.platform) {
         return join_with_sep(&deps.home, &[".config", "claude-code-proxy"], false);
     }
 
@@ -47,7 +47,7 @@ pub fn resolve_config_dir(deps: &DirResolverEnv) -> PathBuf {
 }
 
 pub fn resolve_state_dir(deps: &DirResolverEnv) -> PathBuf {
-    if deps.platform == "win32" {
+    if is_windows(&deps.platform) {
         let local = deps
             .env
             .get("LOCALAPPDATA")
@@ -104,6 +104,14 @@ pub fn provider_auth_file(provider: &str) -> PathBuf {
 pub fn provider_legacy_auth_file(provider: &str) -> PathBuf {
     let deps = DirResolverEnv::default();
     legacy_config_dir(&deps).join(provider).join("auth.json")
+}
+
+fn is_windows(platform: &str) -> bool {
+    matches!(platform, "windows" | "win32")
+}
+
+fn is_macos(platform: &str) -> bool {
+    matches!(platform, "macos" | "darwin")
 }
 
 fn join_with_sep(base: &str, parts: &[&str], win32: bool) -> PathBuf {
