@@ -39,6 +39,7 @@ struct FileConfig {
     #[serde(rename = "aliasProvider")]
     pub alias_provider: Option<String>,
     pub anthropic: Option<AnthropicConfig>,
+    pub picker: Option<PickerConfig>,
     pub log: Option<FileLog>,
     pub kimi: Option<KimiConfig>,
     pub codex: Option<CodexConfig>,
@@ -54,6 +55,16 @@ struct AnthropicConfig {
     pub base_url: Option<String>,
     #[serde(rename = "forwardAuthHeaders")]
     pub forward_auth_headers: Option<bool>,
+}
+
+#[derive(Deserialize, Clone)]
+struct PickerConfig {
+    #[serde(rename = "seedOnStart")]
+    pub seed_on_start: Option<bool>,
+    #[serde(rename = "claudeConfigDirs")]
+    pub claude_config_dirs: Option<Vec<String>>,
+    #[serde(rename = "baseUrl")]
+    pub base_url: Option<String>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -209,6 +220,12 @@ pub fn bind_address() -> String {
     load_config().bind_address
 }
 
+pub fn proxy_auth_token() -> Option<String> {
+    std::env::var("CCP_PROXY_AUTH_TOKEN")
+        .ok()
+        .filter(|token| !token.is_empty())
+}
+
 pub fn alias_provider() -> AliasProvider {
     load_config().alias_provider
 }
@@ -238,6 +255,81 @@ pub fn anthropic_base_url() -> String {
         return url;
     }
     "https://api.anthropic.com".to_string()
+}
+
+/// Whether `serve` seeds Claude Code's `/model` picker cache on startup.
+/// Defaults to on; disable with `picker.seedOnStart: false` or
+/// `CCP_PICKER_SEED_ON_START=0`.
+pub fn picker_seed_on_start() -> bool {
+    if let Ok(raw) = std::env::var("CCP_PICKER_SEED_ON_START") {
+        return matches!(raw.to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+    }
+    read_file_config(&paths::config_dir())
+        .and_then(|file| file.picker)
+        .and_then(|picker| picker.seed_on_start)
+        .unwrap_or(true)
+}
+
+/// Exact `ANTHROPIC_BASE_URL` to record in picker caches. An explicit value is
+/// required for non-default hostnames; otherwise the listening address and
+/// port are used.
+pub fn picker_base_url(bind_address: &str, port: u16) -> String {
+    let configured = std::env::var("CCP_PICKER_BASE_URL").ok().or_else(|| {
+        read_file_config(&paths::config_dir())
+            .and_then(|file| file.picker)
+            .and_then(|picker| picker.base_url)
+    });
+    picker_base_url_with_override(bind_address, port, configured)
+}
+
+fn picker_base_url_with_override(
+    bind_address: &str,
+    port: u16,
+    configured: Option<String>,
+) -> String {
+    if let Some(raw) = configured
+        && !raw.is_empty()
+    {
+        return raw;
+    }
+    let host = match bind_address.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_loopback() || ip.is_unspecified() => "localhost".to_string(),
+        Ok(ip) => ip.to_string(),
+        Err(_) => bind_address.to_string(),
+    };
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => format!("http://{}", std::net::SocketAddr::new(ip, port)),
+        Err(_) => format!("http://{host}:{port}"),
+    }
+}
+
+/// Claude Code config dirs to seed the picker cache into, from
+/// `picker.claudeConfigDirs` or the colon-separated
+/// `CCP_PICKER_CLAUDE_CONFIG_DIRS` env override. A leading `~/` expands to
+/// the home directory. `None` means unconfigured (the caller falls back to
+/// `$CLAUDE_CONFIG_DIR` / `~/.claude`).
+pub fn picker_claude_config_dirs() -> Option<Vec<PathBuf>> {
+    if let Ok(raw) = std::env::var("CCP_PICKER_CLAUDE_CONFIG_DIRS") {
+        return Some(
+            raw.split(':')
+                .filter(|part| !part.is_empty())
+                .map(expand_home)
+                .collect(),
+        );
+    }
+    let dirs = read_file_config(&paths::config_dir())
+        .and_then(|file| file.picker)
+        .and_then(|picker| picker.claude_config_dirs)?;
+    Some(dirs.iter().map(|dir| expand_home(dir)).collect())
+}
+
+fn expand_home(raw: &str) -> PathBuf {
+    if let Some(rest) = raw.strip_prefix("~/")
+        && let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    PathBuf::from(raw)
 }
 
 pub fn anthropic_forward_auth_headers() -> bool {
@@ -276,6 +368,9 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     let mut out = Vec::new();
     if env.contains_key("CCP_BIND_ADDRESS") {
         out.push("bindAddress (env)".to_string());
+    }
+    if env.contains_key("CCP_PROXY_AUTH_TOKEN") {
+        out.push("proxy auth token (env)".to_string());
     }
     if env.contains_key("PORT") {
         out.push("port (env)".to_string());
@@ -319,6 +414,15 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
     if env.contains_key("CCP_ANTHROPIC_FORWARD_AUTH") {
         out.push("anthropic.forwardAuthHeaders (env)".to_string());
     }
+    if env.contains_key("CCP_PICKER_SEED_ON_START") {
+        out.push("picker.seedOnStart (env)".to_string());
+    }
+    if env.contains_key("CCP_PICKER_CLAUDE_CONFIG_DIRS") {
+        out.push("picker.claudeConfigDirs (env)".to_string());
+    }
+    if env.contains_key("CCP_PICKER_BASE_URL") {
+        out.push("picker.baseUrl (env)".to_string());
+    }
     if env
         .get("CCP_CODEX_REASONING_SUMMARY")
         .is_some_and(|raw| !raw.is_empty())
@@ -344,6 +448,17 @@ pub fn config_override_summary_lines(cfg: &LoadedConfig) -> Vec<String> {
             }
             if let Some(v) = anthropic.forward_auth_headers {
                 out.push(format!("anthropic.forwardAuthHeaders: {v}"));
+            }
+        }
+        if let Some(picker) = file_cfg.picker {
+            if let Some(v) = picker.seed_on_start {
+                out.push(format!("picker.seedOnStart: {v}"));
+            }
+            if let Some(dirs) = picker.claude_config_dirs {
+                out.push(format!("picker.claudeConfigDirs: {}", dirs.join(", ")));
+            }
+            if let Some(base_url) = picker.base_url {
+                out.push(format!("picker.baseUrl: {base_url}"));
             }
         }
         if let Some(log) = file_cfg.log {
@@ -691,6 +806,8 @@ mod tests {
             std::env::remove_var("CLAUDE_CODE_OAUTH_TOKEN");
             std::env::remove_var("CCP_ANTHROPIC_AUTH_TOKEN");
             std::env::remove_var("CCP_ANTHROPIC_API_KEY");
+            std::env::remove_var("CCP_PICKER_BASE_URL");
+            std::env::remove_var("CCP_PROXY_AUTH_TOKEN");
         }
     }
 
@@ -745,6 +862,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn picker_base_url_matches_effective_listener() {
+        assert_eq!(
+            picker_base_url_with_override("127.0.0.1", 18765, None),
+            "http://localhost:18765"
+        );
+        assert_eq!(
+            picker_base_url_with_override("::1", 18765, None),
+            "http://localhost:18765"
+        );
+        assert_eq!(
+            picker_base_url_with_override("0.0.0.0", 18765, None),
+            "http://localhost:18765"
+        );
+        assert_eq!(
+            picker_base_url_with_override(
+                "0.0.0.0",
+                18765,
+                Some("https://proxy.example".to_string())
+            ),
+            "https://proxy.example"
+        );
     }
 
     #[test]

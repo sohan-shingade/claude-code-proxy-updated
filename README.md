@@ -2,6 +2,11 @@
 
 Claude Code, powered by **OpenAI**, **Kimi**, **Grok**, or **Cursor**.
 
+This repository is a maintained fork of
+[raine/claude-code-proxy](https://github.com/raine/claude-code-proxy). Thanks to
+Raine Virta and the upstream contributors for the original project. This fork
+remains available under the MIT License; see [LICENSE](LICENSE).
+
 <img src="meta/claude-code-screenshot-2026-07.webp" alt="Claude Code running through claude-code-proxy" />
 
 [Quick start](#quick-start) · [Providers](#providers) ·
@@ -27,20 +32,30 @@ ended up forking it and applying some patches, but would much rather not do it.
 
 ### 1. Install
 
-**Homebrew** (macOS and Linux):
-
-```sh
-brew install raine/claude-code-proxy/claude-code-proxy
-```
-
 **Install script** (macOS and Linux):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/raine/claude-code-proxy/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/sohan-shingade/claude-code-proxy-updated/main/scripts/install.sh | bash
+```
+
+**Build from source** (all Rust-supported platforms):
+
+```sh
+git clone https://github.com/sohan-shingade/claude-code-proxy-updated.git
+cd claude-code-proxy-updated
+cargo build --release --locked
+```
+
+**Nix flake:**
+
+```sh
+nix run github:sohan-shingade/claude-code-proxy-updated
+# or install into your profile:
+nix profile install github:sohan-shingade/claude-code-proxy-updated
 ```
 
 **Manual:** download a prebuilt binary for your platform from the
-[releases page](https://github.com/raine/claude-code-proxy/releases). Windows
+[releases page](https://github.com/sohan-shingade/claude-code-proxy-updated/releases). Windows
 artifacts are published as `claude-code-proxy-windows-amd64.zip` and
 `claude-code-proxy-windows-arm64.zip`; extract the `.exe` somewhere on your
 `PATH`.
@@ -121,8 +136,10 @@ Binds to `127.0.0.1` by default. One `serve` process handles all providers —
 the upstream for each request is chosen from `ANTHROPIC_MODEL`. When stdout is
 a terminal, `serve` opens a monitor TUI with sessions, active requests, recent
 requests, and error events. Use `--no-monitor` for plain terminal output.
-The proxy does not authenticate incoming clients, so protect any non-loopback
-binding with a firewall or an authenticating reverse proxy.
+Non-loopback binds are refused unless `CCP_PROXY_AUTH_TOKEN` is set; clients
+must send it to `/v1/*` as `Authorization: Bearer <token>` or
+`x-api-key: <token>`. `/healthz` stays public. The token does not provide TLS,
+so use HTTPS at a reverse proxy or a trusted private network for remote access.
 
 To explore every monitor pane and interaction without starting the proxy, launch
 its deterministic simulated traffic:
@@ -134,17 +151,8 @@ claude-code-proxy demo
 Resize the terminal to exercise the responsive request table. Press `?` for all
 shortcuts, `Enter` for session and request details, and `b` for the setup overlay.
 
-Installed via Homebrew, the proxy can also run as a background service that
-starts at login and restarts if it exits:
-
-```sh
-brew services start claude-code-proxy
-```
-
-Service output goes to `~/.local/state/claude-code-proxy/service.log`,
-alongside the proxy's own `proxy.log`. Provider logins are still a one-time
-interactive step (e.g. `claude-code-proxy codex auth login`); the service
-serves 401s until a token is stored.
+This fork does not currently publish or promote a Homebrew tap. Use the install
+script, release artifacts, Cargo, or the Nix flake.
 
 ### 4. Point Claude Code at it
 
@@ -157,6 +165,16 @@ serves 401s until a token is stored.
 
 An unknown model returns a 400 listing the supported ids. There is no
 implicit default provider.
+
+Claude Code (v2.1.129+) can also populate its `/model` picker straight from
+this proxy's catalog instead of you typing an id by hand. That needs
+`CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1` and a couple of env
+differences from the one-shot examples below (notably, it needs
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` left unset), and the simplest form
+of it disables claude.ai connectors — see
+[Switch models while staying on the proxy](#switch-models-while-staying-on-the-proxy)
+for both the `ANTHROPIC_AUTH_TOKEN=unused` recipe and a `seed-picker`
+alternative that keeps connectors.
 
 Claude Code also issues background requests (session title generation, token
 counts) against its built-in "small/fast" haiku model id. Those requests
@@ -233,20 +251,63 @@ one of the process-start patterns in
 ### 5. Context window size
 
 Claude Code decides auto-compaction based on the model's context window. For
-unknown models, Claude Code uses its own fallback context size. The `[1m]` suffix
-is a local Claude Code hint that raises that compaction threshold. It is useful
-only when the upstream model can actually handle a window that large.
+unknown models — including every `claude-*` id from the `/model` gateway
+picker, since Claude Code has no way to see a gateway model's real window —
+it falls back to assuming 200K. The `[1m]` suffix is a local Claude Code hint
+that raises that assumed window. It is useful only when the upstream model
+can actually handle a window that large.
 
 Use the `[1m]` suffix for Codex and Kimi models so Claude Code uses a larger
 local compaction threshold, such as `gpt-5.6-sol[1m]`, `gpt-5.6-luna[1m]`, or
-`kimi-for-coding[1m]`. The proxy strips a trailing `[1m]` before sending the
-request upstream. The suffix affects Claude Code's local compaction decision and
-does not increase the upstream model's context window.
+`kimi-for-coding[1m]`. The same suffix works on the picker's synthetic ids
+too — `claude-gpt-5-6-sol[1m]` raises the assumed window the same way
+`gpt-5.6-sol[1m]` does. The proxy strips a trailing `[1m]` before sending the
+request upstream either way. The suffix affects only Claude Code's local
+compaction decision; it does not increase the upstream model's real context
+window.
 
 OpenAI's [GPT-5.6 subscription update](https://x.com/thsottiaux/status/2076495156757577895)
-sets the ChatGPT context limit to 272K tokens. Set
-`CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000` with `gpt-5.6-sol[1m]` so Claude Code
-compacts before the upstream limit.
+gives GPT-5.6 (Sol/Terra/Luna) roughly 1.05M tokens of context on OpenAI's
+metered API, but the ChatGPT-subscription Codex backend this proxy talks to
+caps a session well below that: 272K input plus 128K reserved output (400K
+total), and Codex holds back about 5% of the input budget as further
+headroom, leaving roughly 258K effective before it errors. Set
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000` alongside `gpt-5.6-sol[1m]` (or the
+picker's `claude-gpt-5-6-sol[1m]`) so Claude Code compacts before that cap
+instead of the session dying on a 413 `request_too_large`.
+
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` is global, not per-model: Claude Code
+applies `min(model_window, CLAUDE_CODE_AUTO_COMPACT_WINDOW)` to every model in
+the session, including real Anthropic ids. If the same shell also runs Claude
+Sonnet 5 (1M native context via Anthropic passthrough), setting
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000` compacts that session at 272K too,
+giving up most of its window. Keep the two use cases in separate shell entry
+points rather than one shared env, for example:
+
+```zsh
+# GPT-first: raise the picker's assumed window and clamp compaction to
+# Codex's real 272K cap. Disables claude.ai connectors (Mode A).
+claude-gpt() {
+  ANTHROPIC_BASE_URL=http://localhost:18765 \
+  ANTHROPIC_AUTH_TOKEN=unused \
+  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \
+  ANTHROPIC_MODEL=claude-gpt-5-6-sol[1m] \
+  ANTHROPIC_SMALL_FAST_MODEL=claude-gpt-5-6-luna[1m] \
+  CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000 \
+    claude "$@"
+}
+
+# Claude-first: leave compaction alone so Sonnet/Opus keep their full
+# window, and keep claude.ai connectors (Mode B — pair with `seed-picker`
+# so /model still lists gateway models). A GPT model picked from /model in
+# this session still works; it just compacts at Claude Code's 200K
+# fallback instead of 272K, giving up about 70K tokens of headroom.
+claude-proxy() {
+  ANTHROPIC_BASE_URL=http://localhost:18765 \
+  CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \
+    claude "$@"
+}
+```
 
 If you'd rather disable auto-compact completely, set
 `DISABLE_AUTO_COMPACT=1` in your env or `~/.claude/settings.json`. Manual
@@ -456,6 +517,7 @@ sequenceDiagram
 | --------------------------------------------------- | --------------------------- |
 | [`serve`](#serve)                                   | Start the proxy and monitor |
 | [`demo`](#demo)                                     | Open the TUI with mock data |
+| [`seed-picker`](#seed-picker)                       | Populate `/model` without `ANTHROPIC_AUTH_TOKEN` |
 | `codex auth login` / `device` / `status` / `logout` | Codex OAuth management      |
 | `kimi  auth login` / `status` / `logout`            | Kimi OAuth management       |
 | `cursor auth login` / `status` / `logout`           | Cursor OAuth management     |
@@ -510,6 +572,36 @@ claude-code-proxy demo
 
 Use the normal monitor shortcuts and resize the terminal to inspect wide and
 compact request layouts.
+
+---
+
+### `seed-picker`
+
+Writes the proxy's current model catalog straight to Claude Code's `/model`
+picker cache file (`<config-dir>/cache/gateway-models.json`) so the picker
+lists "From gateway" entries without Claude Code ever fetching them itself —
+and without setting `ANTHROPIC_AUTH_TOKEN`, which would otherwise disable
+claude.ai connectors. See
+[Mode B: `seed-picker`](#mode-b-seed-picker-keeps-claudeai-connectors) for the
+full recipe.
+
+```sh
+claude-code-proxy seed-picker
+claude-code-proxy seed-picker --config-dir ~/.claude --base-url http://localhost:18765
+```
+
+`--config-dir` defaults to the `picker.claudeConfigDirs` list from config.json
+(or `CCP_PICKER_CLAUDE_CONFIG_DIRS`), then `$CLAUDE_CONFIG_DIR`, then
+`~/.claude`. `--base-url` defaults to `picker.baseUrl` /
+`CCP_PICKER_BASE_URL`, then the effective listener URL, and must exactly match
+the `ANTHROPIC_BASE_URL` Claude Code runs with. The cache
+file is written atomically (temp file + rename, mode 0600) so a concurrently
+starting Claude Code session never reads a half-written file.
+
+Since v0.1.22 `serve` runs this seeding automatically at startup, so a manual
+`seed-picker` is only needed when the proxy isn't running or you want to
+target a non-default `--config-dir` / `--base-url`. Restart `claude` after the
+catalog changes — the cache is a snapshot, not a live view.
 
 ---
 
@@ -660,11 +752,15 @@ Clears Cursor credentials from the discovered local auth store. Run
 
 The proxy speaks enough of the Anthropic API for Claude Code:
 
+- `GET /v1/models`: model catalog used by Claude Code gateway discovery
 - `POST /v1/messages`: the main turn endpoint (streaming and non-streaming)
 - `POST /v1/messages?beta=true`: same (Claude Code always sends `?beta=true`)
-- `POST /v1/messages/count_tokens`: local token count via `gpt-tokenizer`
-  (o200k_base); used by Claude Code's compaction logic
-- `GET /healthz`: liveness check
+- `POST /v1/messages/count_tokens`: provider-specific local token estimate (or
+  Anthropic passthrough count); used by Claude Code's compaction logic
+- `GET /healthz`: public liveness check
+
+When `CCP_PROXY_AUTH_TOKEN` is set, every `/v1/*` endpoint requires that value
+as a Bearer token or `x-api-key`. Request bodies are limited to 16 MiB.
 
 ## Configuration
 
@@ -717,7 +813,8 @@ Windows, and at
 
 | Variable                         | Config key                 | Default                                           | Purpose                                                                                                                                                                           |
 | -------------------------------- | -------------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `CCP_BIND_ADDRESS`               | `bindAddress`              | `127.0.0.1`                                       | Proxy listen IP address; use `0.0.0.0` only when remote access is required and protected                                                                                          |
+| `CCP_BIND_ADDRESS`               | `bindAddress`              | `127.0.0.1`                                       | Proxy listen IP address; non-loopback values require `CCP_PROXY_AUTH_TOKEN`                                                                                                      |
+| `CCP_PROXY_AUTH_TOKEN`           | —                          | unset                                             | Require this token on `/v1/*` via `Authorization: Bearer` or `x-api-key`; mandatory for non-loopback binds                                                                        |
 | `PORT`                           | `port`                     | `18765`                                           | Proxy listen port                                                                                                                                                                 |
 | `CCP_CONFIG_DIR`                 | unset                      | platform config dir                               | Per-process config directory; Cursor auth uses it for file storage                                                                                                                |
 | `XDG_STATE_HOME`                 | —                          | `~/.local/state`                                  | Linux/macOS base dir for `proxy.log`                                                                                                                                              |
@@ -725,6 +822,9 @@ Windows, and at
 | `CCP_LOG_VERBOSE`                | `log.verbose`              | unset                                             | Preserve full string fields in `proxy.log`; any env value enables it                                                                                                              |
 | `CCP_TRAFFIC_LOG`                | —                          | unset                                             | Write full per-request traffic captures under `traffic/` for session debugging (`1`, `true`, or `yes`)                                                                            |
 | `CCP_ALIAS_PROVIDER`             | `aliasProvider`            | `codex`                                           | Route Anthropic-style aliases (`haiku`, `sonnet`, `opus`, `claude-*`) through `codex` or `kimi`                                                                                   |
+| `CCP_PICKER_SEED_ON_START`       | `picker.seedOnStart`       | `true`                                            | Seed Claude Code's `/model` picker cache automatically when `serve` starts (`1`, `true`, or `yes`)                                                                                |
+| `CCP_PICKER_CLAUDE_CONFIG_DIRS`  | `picker.claudeConfigDirs`  | `$CLAUDE_CONFIG_DIR`, else `~/.claude`            | Claude Code config dirs to seed, colon-separated in the env var; `~/` expands; missing dirs are skipped                                                                           |
+| `CCP_PICKER_BASE_URL`            | `picker.baseUrl`           | effective listener URL                            | Exact `ANTHROPIC_BASE_URL` stored in the picker cache; set this for a hostname, reverse proxy, or any URL that differs from the listener                                            |
 | `CCP_KIMI_OAUTH_HOST`            | `kimi.oauthHost`           | `https://auth.kimi.com`                           | Override Kimi's OAuth host (debugging only)                                                                                                                                       |
 | `CCP_KIMI_BASE_URL`              | `kimi.baseUrl`             | `https://api.kimi.com/coding/v1`                  | Override Kimi's API base URL                                                                                                                                                      |
 | `CCP_CODEX_MODEL`                | `codex.model`              | unset                                             | Force all Codex requests to this model (`gpt-5.2`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`) |
@@ -985,19 +1085,160 @@ The proxy chooses the upstream provider from the model id on each request, so
 `gpt-5.6-sol`, `kimi-for-coding`, `grok-4.5`, and `cursor:...` can share one
 `serve` process.
 
-To populate Claude Code's model picker from the proxy's `/v1/models` catalog,
-enable gateway discovery when launching:
+To populate Claude Code's `/model` picker from the proxy's `/v1/models`
+catalog, enable gateway discovery. Claude Code fetches
+`GET {ANTHROPIC_BASE_URL}/v1/models?limit=1000` exactly once, at CLI startup,
+with a 3-second timeout, and caches the response in
+`<config-dir>/cache/gateway-models.json`; the picker then lists each cached
+entry's `display_name`, labeled "From gateway".
+
+That startup fetch only happens if `ANTHROPIC_AUTH_TOKEN` (sent as
+`Authorization: Bearer ...`) or an API key is configured. Setting either one
+also switches Claude Code off its claude.ai login for the session, so there
+are two ways to get the picker populated depending on whether you need
+claude.ai connectors (Slack, Google Drive, etc.) at the same time.
+
+#### Mode A: `ANTHROPIC_AUTH_TOKEN` (simplest, connectors disabled)
+
+`ANTHROPIC_AUTH_TOKEN=unused` is not optional here even though the proxy never
+forwards that literal value upstream: `unused` is this proxy's passthrough
+placeholder, swapped for your real provider credentials on every request. Any
+other value is forwarded verbatim to `api.anthropic.com` and comes back as a
+401.
+
+Start the proxy first, then launch (or restart) `claude`. The fetch runs once
+at startup, so a `claude` process that was already running before the proxy
+came up — or before you set these vars — keeps whatever model list it started
+with until you restart it:
 
 ```sh
-CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1 \
-ANTHROPIC_BASE_URL=http://localhost:18765 \
-ANTHROPIC_AUTH_TOKEN=unused \
-ANTHROPIC_MODEL=gpt-5.6-sol[1m] \
-ANTHROPIC_SMALL_FAST_MODEL=gpt-5.6-luna[1m] \
-CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-CLAUDE_CODE_DISABLE_NONSTREAMING_FALLBACK=1 \
-  claude
+export ANTHROPIC_BASE_URL="http://localhost:18765"
+export ANTHROPIC_AUTH_TOKEN="unused"
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+export ANTHROPIC_MODEL="claude-gpt-5-6-sol[1m]"
+export ANTHROPIC_SMALL_FAST_MODEL="claude-gpt-5-6-luna[1m]"
+export CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000
+claude
 ```
+
+This is also what the `serve` banner and `seed-picker` print as the
+Codex-first recipe. The `[1m]` hint and compact window exist because Claude
+Code otherwise assumes a 200K window for unknown `claude-*` ids; see
+[Context window size](#5-context-window-size) for the Codex backend's real
+272K cap and why `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is global rather than
+per-model.
+
+Do **not** set `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` in this recipe (drop
+it even though the one-shot examples in
+[Point Claude Code at it](#4-point-claude-code-at-it) set it) — it makes
+Claude Code skip the discovery fetch entirely. Discovery is also skipped
+whenever `ANTHROPIC_BASE_URL` is unset or points at `api.anthropic.com`, or
+when any `CLAUDE_CODE_USE_*` provider var is set.
+
+Because `ANTHROPIC_AUTH_TOKEN` takes precedence over your claude.ai login,
+Claude Code disables claude.ai connectors for the whole session and, if you
+open one, prints:
+
+> claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth
+> source is set and takes precedence over your claude.ai login
+
+This is enforced by Claude Code itself (verified against the v2.1.212
+binary) — there is no proxy-side flag or env var that brings connectors back
+while `ANTHROPIC_AUTH_TOKEN` is set. If you need connectors, use Mode B
+instead.
+
+#### Mode B: `seed-picker` (keeps claude.ai connectors)
+
+Instead of letting Claude Code fetch the catalog itself (which needs a
+token), write it directly to the same cache file Claude Code would have
+written. Since v0.1.22 `serve` does this automatically on startup: it seeds
+every configured Claude Code config dir (see `picker.claudeConfigDirs`
+below), so normally nothing manual is needed as long as the proxy starts
+before Claude Code. The `seed-picker` command does the same thing on demand:
+
+```sh
+claude-code-proxy seed-picker
+```
+
+`--config-dir <dir>` overrides the Claude Code config dir(s) (default: the
+`picker.claudeConfigDirs` config list, else `$CLAUDE_CONFIG_DIR`, else
+`~/.claude`), and `--base-url <url>` overrides the URL recorded in the cache
+(default: `picker.baseUrl` / `CCP_PICKER_BASE_URL`, then the effective listener
+URL). That recorded `baseUrl` must exactly match the `ANTHROPIC_BASE_URL`
+Claude Code runs with, or Claude Code ignores the cached catalog. Then launch
+Claude Code with only:
+
+```sh
+export ANTHROPIC_BASE_URL="http://localhost:18765"
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+claude
+```
+
+No `ANTHROPIC_AUTH_TOKEN` — Claude Code keeps its claude.ai login and
+connectors. It still attempts the startup discovery fetch, but without a
+token that fetch is skipped and the seeded cache file is left untouched, so
+`/model` reads what `seed-picker` wrote and lists it as "From gateway" same as
+Mode A. Requests instead carry Claude Code's own claude.ai OAuth bearer
+token; for a real Anthropic id (`claude-sonnet-5`, ...) with
+`CCP_ANTHROPIC_PASSTHROUGH` enabled, the proxy forwards that bearer to
+`api.anthropic.com` verbatim, the same as any other passthrough request
+(confirmed end-to-end with a headless `claude -p` session over OAuth).
+
+This mode doesn't set `ANTHROPIC_MODEL`, so if you pick a GPT model from
+`/model` here it compacts at Claude Code's 200K fallback rather than the
+Codex backend's real 272K cap — safe, just conservative. See
+[Context window size](#5-context-window-size) for the `[1m]` + compact-window
+recipe if you want the extra headroom, and why it's kept out of this mode's
+env instead of set globally.
+
+The seeded cache is a point-in-time snapshot, not a live view. With
+auto-seeding it refreshes on every proxy start; restart `claude` after the
+proxy's model catalog changes so the new snapshot is read.
+
+Auto-seeding is controlled by the `picker` section of the proxy's
+`config.json` (or matching `CCP_*` env overrides):
+
+```json
+{
+  "picker": {
+    "seedOnStart": true,
+    "claudeConfigDirs": ["~/.claude-personal"],
+    "baseUrl": "http://localhost:18765"
+  }
+}
+```
+
+- `seedOnStart` (env: `CCP_PICKER_SEED_ON_START`, default `true`) — seed on
+  every `serve` startup.
+- `claudeConfigDirs` (env: `CCP_PICKER_CLAUDE_CONFIG_DIRS`, colon-separated) —
+  the Claude Code config dirs to seed. Defaults to `$CLAUDE_CONFIG_DIR` from
+  the proxy's own environment, then `~/.claude`. If you launch Claude Code
+  with a custom `CLAUDE_CONFIG_DIR` (e.g. `~/.claude-personal`) that the
+  proxy's shell doesn't have set, list it here explicitly. Directories that
+  don't exist are skipped, never created.
+- `baseUrl` (env: `CCP_PICKER_BASE_URL`) — exact URL to record in the cache.
+  By default it follows the effective listener (`localhost` is used for a
+  loopback or unspecified bind); set it explicitly when Claude Code uses a hostname,
+  reverse proxy, or a different scheme. It must exactly equal
+  `ANTHROPIC_BASE_URL`.
+
+All seeding writes atomically (same-directory temp file + rename, mode 0600):
+Claude Code reads this cache at most once per session and memoizes a parse
+failure as "no gateway models", so it must never observe a partial write.
+
+Claude Code's picker only lists catalog ids matching `/^(claude|anthropic)/i`,
+which is why the proxy advertises non-Anthropic models under synthetic
+`claude`-prefixed ids in `/v1/models`: the upstream id is prefixed with
+`claude-` and its dots become hyphens, e.g. `gpt-5.6-sol` becomes
+`claude-gpt-5-6-sol` and `gpt-5.3-codex-spark-fast` becomes
+`claude-gpt-5-3-codex-spark-fast`. The proxy maps a synthetic id back to the
+real upstream id on every request (both the hyphenized and the dotted
+spelling are accepted, and a trailing `[1m]` is stripped first), so picking
+`claude-gpt-5-6-sol` from `/model` still calls Codex's `gpt-5.6-sol`. Real
+Anthropic ids (`claude-sonnet-5`, `claude-opus-4-8`, ...) also appear in the
+catalog as themselves: they route to Anthropic passthrough when
+`CCP_ANTHROPIC_PASSTHROUGH` is enabled, or to the configured alias provider
+(Codex, Kimi, ...) otherwise.
 
 `/model` only changes the model id. It does not move a session from the proxy
 to direct Anthropic or the other way around. For that, start a new process with
@@ -1045,17 +1286,16 @@ supported shape.
   generated protobuf classes. Set `CCP_CURSOR_AGENT_BUNDLE` if auto-detection
   cannot find `cursor-agent`.
 - **Cursor — tool round-trips:** text, thinking, plan mode, ask mode, auth, and
-  session continuation are implemented. Full Cursor workspace/tool callbacks are
-  captured and documented under `history/`, but not yet implemented as Claude
-  tool round-trips.
+  session continuation are implemented. Full Cursor workspace/tool callbacks
+  are not yet implemented as Claude tool round-trips.
 
 ## Development
 
 ```sh
 cargo run -- serve                         # run locally (routes all providers)
-cargo test --all                           # run tests
-cargo fmt --all --check                    # check formatting
-cargo clippy --all-targets -- -D warnings  # lint
+cargo test --all-targets --all-features --locked # run tests
+cargo fmt --all -- --check                    # check formatting
+cargo clippy --all-targets --all-features --locked  # lint
 just check                                 # run the full project check
 ```
 

@@ -1675,9 +1675,11 @@ pub fn setup_text(port: u16, registry: &Registry) -> String {
     lines.push(format!(
         "export ANTHROPIC_BASE_URL=\"http://localhost:{port}\""
     ));
+    lines.push("export ANTHROPIC_AUTH_TOKEN=\"unused\"".to_string());
     lines.push("export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1".to_string());
-    lines.push("export ANTHROPIC_MODEL=\"claude-gpt-5-6-sol\"".to_string());
-    lines.push("export ANTHROPIC_SMALL_FAST_MODEL=\"claude-gpt-5-6-luna\"".to_string());
+    lines.push("export ANTHROPIC_MODEL=\"claude-gpt-5-6-sol[1m]\"".to_string());
+    lines.push("export ANTHROPIC_SMALL_FAST_MODEL=\"claude-gpt-5-6-luna[1m]\"".to_string());
+    lines.push("export CLAUDE_CODE_AUTO_COMPACT_WINDOW=272000".to_string());
     lines.join("\n")
 }
 
