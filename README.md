@@ -1,6 +1,8 @@
 # claude-code-proxy
 
-Claude Code, powered by **OpenAI**, **Kimi**, **Grok**, or **Cursor**.
+Claude Code, powered by **OpenAI**, **Kimi**, **Grok**, or **Cursor** — with
+optional **Anthropic passthrough**, so one proxy can serve GPT and real Claude
+models side by side in the same session.
 
 This repository is a maintained fork of
 [raine/claude-code-proxy](https://github.com/raine/claude-code-proxy). Thanks to
@@ -11,7 +13,9 @@ remains available under the MIT License; see [LICENSE](LICENSE).
 
 [Quick start](#quick-start) · [Providers](#providers) ·
 [How it works](#how-it-works) · [Configuration](#configuration) ·
-[Switching models](#switching-models-and-backends) · [Limitations](#limitations)
+[Switching models](#switching-models-and-backends) ·
+[Agent teams](#mixed-model-agent-teams-claude-orchestrating-gpt-subagents) ·
+[Limitations](#limitations)
 
 > [!TIP]
 > I'm building [aven](https://github.com/raine/aven), a local-first task manager
@@ -158,10 +162,12 @@ script, release artifacts, Cargo, or the Nix flake.
 
 `ANTHROPIC_MODEL` selects the provider:
 
-- `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.4-mini`, `gpt-5.2` → **codex**
+- `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.3-codex`, `gpt-5.3-codex-spark`, `gpt-5.4-mini`, `gpt-5.2` (plus the `gpt-5`, `gpt-5-mini`, `gpt-5-codex` aliases) → **codex**
 - `kimi-for-coding`, `kimi-k2.6`, `k2.6` → **kimi**
 - `grok-composer-2.5-fast`, `grok-4.5` → **grok**
 - `cursor`, `cursor-plan`, `cursor-ask`, `composer-2.5`, `composer-2.5-fast`, `cursor:<model-id>`, `cursor-plan:<model-id>`, `cursor-ask:<model-id>` → **cursor**
+- `claude-sonnet-5`, `claude-opus-4-8`, `claude-fable-5`, and other real `claude-*` ids → **anthropic** passthrough when `CCP_ANTHROPIC_PASSTHROUGH=1` (see [Anthropic passthrough](#anthropic-passthrough)); otherwise the alias provider (**codex** by default)
+- `haiku`, `sonnet`, `opus`, `fable` → the alias provider (`CCP_ALIAS_PROVIDER`, **codex** by default; on Codex, haiku maps to `gpt-5.6-luna`, sonnet to `gpt-5.6-terra`, opus and fable to `gpt-5.6-sol`)
 
 An unknown model returns a 400 listing the supported ids. There is no
 implicit default provider.
@@ -485,6 +491,48 @@ Auth:
 | `cursor auth status` | Shows proxy-owned Cursor credential source and token expiry |
 | `cursor auth logout` | Clears proxy-owned Cursor credentials                       |
 
+### Anthropic (passthrough)
+
+Upstream: `https://api.anthropic.com` (verbatim forward, no translation).
+
+Disabled by default. Enable with `CCP_ANTHROPIC_PASSTHROUGH=1` or
+`anthropic.passthroughEnabled: true` in config.json. When enabled, every real
+`claude-*` model id (`claude-sonnet-5`, `claude-opus-4-8`, `claude-fable-5`,
+...) is forwarded to Anthropic as-is — request body untouched, streaming
+preserved, `anthropic-version` and `anthropic-beta` headers passed through.
+The synthetic `claude-gpt-*` picker ids still route to Codex, so passthrough
+and gateway discovery coexist in one `serve` process.
+
+This is what makes **hybrid sessions** possible: one `ANTHROPIC_BASE_URL`,
+one monitor, and both real Claude models and GPT/Kimi/Grok/Cursor models
+available to the same Claude Code session — switch with `/model` mid-session,
+or run Claude as the main agent with GPT subagents (see
+[Mixed-model agent teams](#mixed-model-agent-teams-claude-orchestrating-gpt-subagents)).
+
+There is no `anthropic auth login` — passthrough reuses credentials you
+already have, resolved per request in this order:
+
+1. **Forwarded client auth** (default, disable with
+   `CCP_ANTHROPIC_FORWARD_AUTH=0`): the incoming `Authorization` or
+   `x-api-key` header is sent upstream verbatim. The literal `unused`
+   placeholder is never forwarded, so the Mode A gateway-discovery recipe
+   doesn't leak it. In Mode B (`seed-picker`, no `ANTHROPIC_AUTH_TOKEN`)
+   Claude Code sends its own claude.ai OAuth bearer, which passes straight
+   through — confirmed end-to-end with a headless `claude -p` session.
+2. `CCP_CLAUDE_CODE_OAUTH_TOKEN` or `CLAUDE_CODE_OAUTH_TOKEN` — a proxy-side
+   Claude OAuth bearer.
+3. `CCP_ANTHROPIC_AUTH_TOKEN` — a proxy-side Anthropic bearer token.
+4. `~/.claude/.credentials.json` — the Claude Code OAuth access token on disk
+   (path override: `CCP_CLAUDE_CREDENTIALS_PATH`).
+5. `CCP_ANTHROPIC_API_KEY` — sent as `x-api-key`.
+
+If none resolve, the request fails with a 401 explaining which variables to
+set. With passthrough **disabled**, `claude-*` ids and the `haiku` / `sonnet`
+/ `opus` / `fable` aliases route to the alias provider instead
+(`CCP_ALIAS_PROVIDER`, default Codex — haiku becomes `gpt-5.6-luna`, sonnet
+`gpt-5.6-terra`, opus and fable `gpt-5.6-sol`), so portable configs and
+subagents keep working without an Anthropic account.
+
 ## How it works
 
 ```mermaid
@@ -493,7 +541,7 @@ sequenceDiagram
     participant CC as Claude Code
     participant P as claude-code-proxy
     participant AUTH as OAuth host / credential store
-    participant U as Upstream API<br/>(Codex, Kimi, or Cursor)
+    participant U as Upstream API<br/>(Codex, Kimi, Grok, Cursor,<br/>or Anthropic passthrough)
 
     Note over P,AUTH: One-time: PKCE / device OAuth<br/>tokens cached locally for reuse
 
@@ -520,6 +568,7 @@ sequenceDiagram
 | [`seed-picker`](#seed-picker)                       | Populate `/model` without `ANTHROPIC_AUTH_TOKEN` |
 | `codex auth login` / `device` / `status` / `logout` | Codex OAuth management      |
 | `kimi  auth login` / `status` / `logout`            | Kimi OAuth management       |
+| `grok auth login` / `device` / `status` / `logout`  | Grok OAuth management       |
 | `cursor auth login` / `status` / `logout`           | Cursor OAuth management     |
 
 ---
@@ -779,6 +828,11 @@ Windows, and at
   "bindAddress": "127.0.0.1",
   "port": 18765,
   "aliasProvider": "codex",
+  "anthropic": {
+    "passthroughEnabled": false,
+    "baseUrl": "https://api.anthropic.com",
+    "forwardAuthHeaders": true
+  },
   "codex": {
     "originator": "claude-code-proxy",
     "userAgent": "claude-code-proxy/dev",
@@ -821,7 +875,14 @@ Windows, and at
 | `CCP_LOG_STDERR`                 | `log.stderr`               | unset                                             | Also mirror log lines to stderr; any env value enables it                                                                                                                         |
 | `CCP_LOG_VERBOSE`                | `log.verbose`              | unset                                             | Preserve full string fields in `proxy.log`; any env value enables it                                                                                                              |
 | `CCP_TRAFFIC_LOG`                | —                          | unset                                             | Write full per-request traffic captures under `traffic/` for session debugging (`1`, `true`, or `yes`)                                                                            |
-| `CCP_ALIAS_PROVIDER`             | `aliasProvider`            | `codex`                                           | Route Anthropic-style aliases (`haiku`, `sonnet`, `opus`, `claude-*`) through `codex` or `kimi`                                                                                   |
+| `CCP_ALIAS_PROVIDER`             | `aliasProvider`            | `codex`                                           | Route Anthropic-style aliases (`haiku`, `sonnet`, `opus`, `fable`, `claude-*`) through `codex` or `kimi` when passthrough is off                                                  |
+| `CCP_ANTHROPIC_PASSTHROUGH`      | `anthropic.passthroughEnabled` | `false`                                       | Forward real `claude-*` model ids verbatim to Anthropic instead of the alias provider (`1`, `true`, or `yes`)                                                                     |
+| `CCP_ANTHROPIC_BASE_URL`         | `anthropic.baseUrl`        | `https://api.anthropic.com`                       | Override the Anthropic passthrough base URL                                                                                                                                       |
+| `CCP_ANTHROPIC_FORWARD_AUTH`     | `anthropic.forwardAuthHeaders` | `true`                                        | Forward the client's `Authorization` / `x-api-key` header on passthrough requests (the `unused` placeholder is never forwarded)                                                   |
+| `CCP_CLAUDE_CODE_OAUTH_TOKEN`    | —                          | unset                                             | Proxy-side Claude OAuth bearer for passthrough when no client auth is forwarded; plain `CLAUDE_CODE_OAUTH_TOKEN` is also honored                                                  |
+| `CCP_ANTHROPIC_AUTH_TOKEN`       | —                          | unset                                             | Proxy-side Anthropic bearer-token fallback for passthrough                                                                                                                        |
+| `CCP_ANTHROPIC_API_KEY`          | —                          | unset                                             | Proxy-side Anthropic API key fallback for passthrough, sent as `x-api-key`                                                                                                        |
+| `CCP_CLAUDE_CREDENTIALS_PATH`    | —                          | `~/.claude/.credentials.json`                     | Claude Code credentials file read for the passthrough OAuth-token fallback                                                                                                        |
 | `CCP_PICKER_SEED_ON_START`       | `picker.seedOnStart`       | `true`                                            | Seed Claude Code's `/model` picker cache automatically when `serve` starts (`1`, `true`, or `yes`)                                                                                |
 | `CCP_PICKER_CLAUDE_CONFIG_DIRS`  | `picker.claudeConfigDirs`  | `$CLAUDE_CONFIG_DIR`, else `~/.claude`            | Claude Code config dirs to seed, colon-separated in the env var; `~/` expands; missing dirs are skipped                                                                           |
 | `CCP_PICKER_BASE_URL`            | `picker.baseUrl`           | effective listener URL                            | Exact `ANTHROPIC_BASE_URL` stored in the picker cache; set this for a hostname, reverse proxy, or any URL that differs from the listener                                            |
@@ -1180,7 +1241,9 @@ token that fetch is skipped and the seeded cache file is left untouched, so
 `/model` reads what `seed-picker` wrote and lists it as "From gateway" same as
 Mode A. Requests instead carry Claude Code's own claude.ai OAuth bearer
 token; for a real Anthropic id (`claude-sonnet-5`, ...) with
-`CCP_ANTHROPIC_PASSTHROUGH` enabled, the proxy forwards that bearer to
+`CCP_ANTHROPIC_PASSTHROUGH` enabled (see
+[Anthropic passthrough](#anthropic-passthrough)), the proxy forwards that
+bearer to
 `api.anthropic.com` verbatim, the same as any other passthrough request
 (confirmed end-to-end with a headless `claude -p` session over OAuth).
 
@@ -1236,7 +1299,8 @@ real upstream id on every request (both the hyphenized and the dotted
 spelling are accepted, and a trailing `[1m]` is stripped first), so picking
 `claude-gpt-5-6-sol` from `/model` still calls Codex's `gpt-5.6-sol`. Real
 Anthropic ids (`claude-sonnet-5`, `claude-opus-4-8`, ...) also appear in the
-catalog as themselves: they route to Anthropic passthrough when
+catalog as themselves: they route to
+[Anthropic passthrough](#anthropic-passthrough) when
 `CCP_ANTHROPIC_PASSTHROUGH` is enabled, or to the configured alias provider
 (Codex, Kimi, ...) otherwise.
 
@@ -1254,6 +1318,69 @@ different env (or flip the flag-file wrapper and open a new session).
 If you need a cross-app profile switcher, use a dedicated tool for that. For
 Claude Code + this proxy, process-start env plus `/model` on the proxy is the
 supported shape.
+
+## Mixed-model agent teams (Claude orchestrating GPT subagents)
+
+Because the proxy routes **per request** by model id, and Claude Code's Agent
+tool lets each subagent declare its own `model`, one session can natively mix
+providers: a Claude model as the main agent (via
+[Anthropic passthrough](#anthropic-passthrough)) orchestrating GPT-5.6
+subagents (via Codex), or the reverse. Everything stays inside the Claude Code
+harness — subagents get the normal Claude Code toolset, run in the parent's
+working directory, receive the task context the parent writes into their
+prompt, and report back to the parent like any other subagent. No second CLI,
+no MCP bridge, no per-agent API keys.
+
+Setup is the two pieces you already have from the quick start:
+
+1. `serve` running with your Codex login, plus `CCP_ANTHROPIC_PASSTHROUGH=1`
+   so real `claude-*` ids reach Anthropic.
+2. A session launched through the proxy with gateway discovery (Mode A or
+   Mode B), so both the real Claude ids and the synthetic `claude-gpt-*` ids
+   are valid in one session.
+
+Then drop agent definitions in `.claude/agents/` (project) or
+`~/.claude/agents/` (user). The `model` frontmatter is the whole trick — a
+synthetic picker id routes that subagent's requests to Codex while the parent
+stays on Claude:
+
+```markdown
+---
+name: codex-5-6-sol
+description: GPT-5.6 Sol subagent for parallel implementation work or a
+  second opinion from a different model family. Full tool access.
+model: claude-gpt-5-6-sol[1m]
+tools: Bash, Glob, Grep, Read, Edit, Write, WebFetch, WebSearch
+---
+
+You are a subagent running on GPT-5.6 Sol inside the Claude Code harness.
+Work the task end to end and verify your changes before reporting. Your
+final message is returned to the main agent, so make it self-contained.
+```
+
+Patterns that work well:
+
+- **Cross-model review:** a read-only GPT subagent (`tools:` without
+  `Edit`/`Write`) reviewing the Claude parent's diff — genuinely independent
+  second opinions, since the reviewer is a different model family.
+- **Tiered fan-out:** `claude-gpt-5-6-luna[1m]` subagents for cheap parallel
+  grunt work (searches, mechanical edits, summaries) while the parent stays
+  on a stronger model for synthesis.
+- **Parallel implementation:** several GPT subagents working independent
+  tasks concurrently, each burning ChatGPT-subscription quota instead of
+  Anthropic quota, with the Claude parent coordinating and integrating.
+- **In-session switching:** `/model` flips the main agent between
+  `claude-sonnet-5` and `claude-gpt-5-6-sol[1m]` without restarting, since
+  both resolve through the same base URL.
+
+Caveats: the `claude-gpt-*` ids only exist behind this proxy, so these agent
+definitions fail in sessions not launched through it — keep proxy-only agents
+in a config dir you use with the proxy (e.g. `CLAUDE_CONFIG_DIR` pointed at a
+separate dir, seeded via `picker.claudeConfigDirs`). Subagent requests count
+against the upstream account their model routes to, and the `[1m]` /
+compact-window guidance from
+[Context window size](#5-context-window-size) applies to subagent models the
+same as the main model.
 
 ## Limitations
 

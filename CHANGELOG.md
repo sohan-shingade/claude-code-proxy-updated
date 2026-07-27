@@ -2,6 +2,21 @@
 
 ## v0.1.22 (2026-07-17)
 
+- New optional Anthropic passthrough provider (`CCP_ANTHROPIC_PASSTHROUGH=1`
+  or `anthropic.passthroughEnabled`): real `claude-*` model ids are forwarded
+  verbatim to `api.anthropic.com` (override with `CCP_ANTHROPIC_BASE_URL`),
+  reusing the client's own auth headers by default
+  (`CCP_ANTHROPIC_FORWARD_AUTH`) with proxy-side fallbacks
+  (`CLAUDE_CODE_OAUTH_TOKEN`, `CCP_ANTHROPIC_AUTH_TOKEN`,
+  `~/.claude/.credentials.json`, `CCP_ANTHROPIC_API_KEY`). One proxy can now
+  serve hybrid sessions that mix real Claude models with Codex/Kimi/Grok/
+  Cursor models — including Claude main agents orchestrating GPT subagents
+  via Claude Code agent definitions with synthetic `claude-gpt-*` model ids.
+- Added the `fable` alias and `claude-fable-5` model id; on Codex, `fable`
+  and `opus` map to `gpt-5.6-sol`, `sonnet` to `gpt-5.6-terra`, and `haiku`
+  to `gpt-5.6-luna`. Codex also accepts the `gpt-5`, `gpt-5-mini`, and
+  `gpt-5-codex` aliases.
+
 - Added optional inbound authentication with `CCP_PROXY_AUTH_TOKEN` for all
   `/v1/*` routes via Bearer or `x-api-key`, while keeping `/healthz` public.
   Non-loopback binds are now refused without a token, and request bodies are
