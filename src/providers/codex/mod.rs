@@ -771,10 +771,39 @@ fn map_codex_error_to_response(err: &client::CodexError) -> Response {
     }
 
     match err.status {
-        401 | 403 => json_error(
+        // An edge rejection (Cloudflare bot/rate protection in front of the
+        // Codex backend) answers a WebSocket upgrade with 403 and an empty
+        // body. The credential is fine, so reporting it as an auth failure
+        // sends people off re-running `codex auth login` for nothing. Surface
+        // it as the throttle it is, with a Retry-After so clients back off.
+        403 if client::is_edge_rejection(err) => {
+            let retry_after = err.retry_after.as_deref().unwrap_or("5");
+            let resp = json_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "Upstream edge rejected the Codex WebSocket handshake (HTTP 403, empty body). \
+                 This is connection throttling, not an authentication failure — the stored \
+                 credential was not used. Retry, lower request concurrency, or set \
+                 codex.transport to \"http\".",
+            );
+            let headers = [(http::header::RETRY_AFTER, retry_after)];
+            (headers, resp).into_response()
+        }
+        403 => json_error(
+            StatusCode::FORBIDDEN,
+            "permission_error",
+            err.detail
+                .as_deref()
+                .filter(|detail| !detail.trim().is_empty())
+                .unwrap_or("Upstream refused the request (HTTP 403)"),
+        ),
+        401 => json_error(
             StatusCode::UNAUTHORIZED,
             "authentication_error",
-            err.detail.as_deref().unwrap_or("Authentication failed"),
+            err.detail
+                .as_deref()
+                .filter(|detail| !detail.trim().is_empty())
+                .unwrap_or("Authentication failed (upstream HTTP 401)"),
         ),
         429 => {
             let retry_after = err.retry_after.as_deref().unwrap_or("5");
@@ -1091,6 +1120,84 @@ mod tests {
         assert_eq!(
             body.pointer("/error/message").and_then(|v| v.as_str()),
             Some("WebSocket connect error: HTTP error: 502 Bad Gateway")
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_body_handshake_403_reports_throttling_not_auth_failure() {
+        let err = client::CodexError {
+            status: 403,
+            message: "WebSocket connect error: HTTP error: 403 Forbidden".to_string(),
+            detail: None,
+            retry_after: None,
+            origin: client::CodexErrorOrigin::WebSocketHandshake,
+        };
+
+        let response = map_codex_error_to_response(&err);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body.pointer("/error/type").and_then(|v| v.as_str()),
+            Some("rate_limit_error")
+        );
+        let message = body
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert!(message.contains("not an authentication failure"));
+    }
+
+    #[tokio::test]
+    async fn handshake_403_with_body_stays_a_permission_error() {
+        let err = client::CodexError {
+            status: 403,
+            message: "WebSocket connect error: HTTP error: 403 Forbidden".to_string(),
+            detail: Some("policy denied".to_string()),
+            retry_after: None,
+            origin: client::CodexErrorOrigin::WebSocketHandshake,
+        };
+
+        let response = map_codex_error_to_response(&err);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body.pointer("/error/type").and_then(|v| v.as_str()),
+            Some("permission_error")
+        );
+        assert_eq!(
+            body.pointer("/error/message").and_then(|v| v.as_str()),
+            Some("policy denied")
+        );
+    }
+
+    #[tokio::test]
+    async fn detailless_401_names_the_upstream_status() {
+        let err = client::CodexError {
+            status: 401,
+            message: "Unauthorized".to_string(),
+            detail: None,
+            retry_after: None,
+            origin: client::CodexErrorOrigin::Http,
+        };
+
+        let response = map_codex_error_to_response(&err);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body.pointer("/error/message").and_then(|v| v.as_str()),
+            Some("Authentication failed (upstream HTTP 401)")
         );
     }
 

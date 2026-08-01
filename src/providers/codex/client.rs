@@ -1176,7 +1176,25 @@ fn log_buffered_retry_exhausted(
     create_logger("codex").warn("buffered_transport_retry_exhausted", Some(fields));
 }
 
+/// Cloudflare's bot/rate protection in front of the Codex backend answers a
+/// WebSocket upgrade with `403` and an empty body once handshakes arrive too
+/// quickly. A genuine authorization refusal from the API carries a JSON body,
+/// so an empty one is what tells the two apart. The stored credential is never
+/// even evaluated in this case, which is why retrying (or falling back to HTTP)
+/// succeeds with the exact same token.
+pub fn is_edge_rejection(err: &CodexError) -> bool {
+    err.status == 403
+        && err.origin == CodexErrorOrigin::WebSocketHandshake
+        && err
+            .detail
+            .as_deref()
+            .is_none_or(|detail| detail.trim().is_empty())
+}
+
 fn is_retryable_transport_error(err: &CodexError) -> bool {
+    if is_edge_rejection(err) {
+        return true;
+    }
     if err.origin == CodexErrorOrigin::WebSocketHandshake {
         return err.status == 0 || should_retry_codex_status(err.status);
     }
@@ -1664,6 +1682,47 @@ mod tests {
         };
 
         assert!(!is_retryable_transport_error(&err));
+    }
+
+    #[test]
+    fn empty_body_handshake_403_is_an_edge_rejection_and_retryable() {
+        let err = CodexError {
+            status: 403,
+            message: "WebSocket connect error: HTTP error: 403 Forbidden".to_string(),
+            detail: None,
+            retry_after: None,
+            origin: CodexErrorOrigin::WebSocketHandshake,
+        };
+
+        assert!(is_edge_rejection(&err));
+        assert!(is_retryable_transport_error(&err));
+    }
+
+    #[test]
+    fn handshake_403_carrying_a_body_is_not_an_edge_rejection() {
+        let err = CodexError {
+            status: 403,
+            message: "WebSocket connect error: HTTP error: 403 Forbidden".to_string(),
+            detail: Some("policy denied".to_string()),
+            retry_after: None,
+            origin: CodexErrorOrigin::WebSocketHandshake,
+        };
+
+        assert!(!is_edge_rejection(&err));
+        assert!(!is_retryable_transport_error(&err));
+    }
+
+    #[test]
+    fn http_403_is_not_an_edge_rejection() {
+        let err = CodexError {
+            status: 403,
+            message: "Forbidden".to_string(),
+            detail: None,
+            retry_after: None,
+            origin: CodexErrorOrigin::Http,
+        };
+
+        assert!(!is_edge_rejection(&err));
     }
 
     #[test]
