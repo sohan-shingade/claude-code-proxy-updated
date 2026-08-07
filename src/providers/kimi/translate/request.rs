@@ -272,6 +272,18 @@ fn build_messages(req: &MessagesRequest) -> Result<Vec<KimiMessage>, anyhow::Err
         match msg.role.as_str() {
             "user" => push_user_messages(&mut out, &blocks),
             "assistant" => push_assistant_message(&mut out, &blocks),
+            // Claude Code can put a system turn inside `messages` rather than
+            // in the top-level `system` field. Kimi's API takes system
+            // messages inline, so pass it through instead of failing the
+            // whole request.
+            "system" => {
+                if let Some(content) = flatten_system_text(Some(&msg.content)) {
+                    out.push(KimiMessage::System {
+                        role: "system".to_string(),
+                        content,
+                    });
+                }
+            }
             other => {
                 anyhow::bail!("unexpected message role: {other}");
             }
@@ -722,6 +734,57 @@ mod tests {
             }
             _ => panic!("expected User message"),
         }
+    }
+
+    #[test]
+    fn system_role_message_is_passed_through_not_rejected() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "k3",
+            "messages": [
+                {"role": "system", "content": "be terse"},
+                {"role": "user", "content": "hi"}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_request(&req, TranslateOptions { session_id: None })
+            .expect("a system-role message must not fail the request");
+        match &translated.messages[0] {
+            KimiMessage::System { role, content } => {
+                assert_eq!(role, "system");
+                assert_eq!(content, "be terse");
+            }
+            other => panic!("expected System message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn system_role_message_accepts_block_content() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "k3",
+            "messages": [
+                {"role": "system", "content": [
+                    {"type": "text", "text": "first"},
+                    {"type": "text", "text": "second"}
+                ]},
+                {"role": "user", "content": "hi"}
+            ]
+        }))
+        .unwrap();
+        let translated = translate_request(&req, TranslateOptions { session_id: None }).unwrap();
+        match &translated.messages[0] {
+            KimiMessage::System { content, .. } => assert_eq!(content, "first\n\nsecond"),
+            other => panic!("expected System message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_role_still_errors() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "k3",
+            "messages": [{"role": "wizard", "content": "hi"}]
+        }))
+        .unwrap();
+        assert!(translate_request(&req, TranslateOptions { session_id: None }).is_err());
     }
 
     #[test]
