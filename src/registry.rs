@@ -18,6 +18,7 @@ pub const ANTHROPIC_MODELS: &[&str] = &[
     "claude-sonnet-5",
     "claude-opus-4-7",
     "claude-opus-4-8",
+    "claude-opus-5",
     "claude-fable-5",
 ];
 
@@ -48,10 +49,18 @@ pub(crate) const CODEX_MODELS: &[&str] = &[
 
 pub(crate) const CODEX_MODEL_ALIASES: &[&str] = &["gpt-5", "gpt-5-mini", "gpt-5-codex"];
 
-pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "k2.6"];
-/// The Kimi aliases all collapse to the same wire model, so only the canonical
-/// id earns a picker entry; the rest stay routable when typed explicitly.
-pub(crate) const KIMI_PICKER_MODELS: &[&str] = &["kimi-for-coding"];
+/// The models `api.kimi.com/coding/v1/models` actually serves. The upstream
+/// answers unrecognized ids with some default model instead of erroring, so
+/// this list is what stops a typo from quietly running on the wrong model.
+pub(crate) const KIMI_MODELS: &[&str] = &[
+    "kimi-for-coding",
+    "kimi-for-coding-highspeed",
+    "k3",
+    "k3-256k",
+];
+/// Every Kimi model is a genuinely different choice, so all of them earn a
+/// picker entry.
+pub(crate) const KIMI_PICKER_MODELS: &[&str] = KIMI_MODELS;
 pub(crate) const GROK_MODELS: &[&str] = &["grok-composer-2.5-fast", "grok-4.5"];
 
 pub struct Registry {
@@ -379,6 +388,34 @@ fn build_cursor_models() -> Vec<String> {
     out
 }
 
+/// Reorders catalog entries so that `pinned` ids come first, in the order
+/// given; everything else keeps its existing (alphabetical) position. Ids are
+/// compared after normalization, so `k3`, `claude-k3` and `gpt-5.6-sol` all
+/// match the catalog entry they name. Pinned ids that aren't in the catalog
+/// are ignored, so a stale favorite is harmless.
+pub fn apply_pinned_order(
+    models: Vec<(String, String)>,
+    pinned: &[String],
+) -> Vec<(String, String)> {
+    if pinned.is_empty() {
+        return models;
+    }
+    let ranks: HashMap<String, usize> = pinned
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (normalize_incoming_model(id), index))
+        .collect();
+    let mut models = models;
+    // sort_by_key is stable, so unpinned entries keep their relative order.
+    models.sort_by_key(|(id, _)| {
+        ranks
+            .get(&normalize_incoming_model(id))
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    models
+}
+
 fn discovery_model_id(provider: &str, model: &str) -> String {
     match provider {
         "codex" | "kimi" => gateway_discovery_model_id(model),
@@ -502,17 +539,91 @@ mod tests {
     }
 
     #[test]
-    fn kimi_appears_once_in_the_catalog() {
+    fn every_kimi_model_appears_in_the_catalog() {
         let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, true);
-        let kimi: Vec<_> = registry
+        let kimi: Vec<String> = registry
             .catalog_models()
             .into_iter()
             .filter(|(_, provider)| provider == "kimi")
+            .map(|(id, _)| id)
             .collect();
         assert_eq!(
             kimi,
-            vec![("claude-kimi-for-coding".to_string(), "kimi".to_string())]
+            vec![
+                "claude-k3".to_string(),
+                "claude-k3-256k".to_string(),
+                "claude-kimi-for-coding".to_string(),
+                "claude-kimi-for-coding-highspeed".to_string(),
+            ]
         );
+    }
+
+    #[test]
+    fn every_kimi_picker_id_routes_to_kimi() {
+        let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, true);
+        for (id, _) in registry
+            .catalog_models()
+            .into_iter()
+            .filter(|(_, provider)| provider == "kimi")
+        {
+            let provider = registry.provider_for_model(&id, None);
+            assert_eq!(
+                provider.expect("provider").name(),
+                "kimi",
+                "{id} must reach the Kimi handler"
+            );
+        }
+    }
+
+    #[test]
+    fn pinned_ids_come_first_in_the_order_given() {
+        let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, true);
+        let pinned: Vec<String> = ["claude-opus-5", "claude-fable-5", "claude-gpt-5-6-sol", "k3"]
+            .iter()
+            .map(|id| id.to_string())
+            .collect();
+        let ordered = apply_pinned_order(registry.catalog_models(), &pinned);
+        let ids: Vec<&str> = ordered.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            &ids[..4],
+            &[
+                "claude-opus-5",
+                "claude-fable-5",
+                "claude-gpt-5-6-sol",
+                "claude-k3"
+            ]
+        );
+    }
+
+    #[test]
+    fn pinning_keeps_every_model_and_leaves_the_rest_alphabetical() {
+        let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, true);
+        let catalog = registry.catalog_models();
+        let pinned = vec!["k3".to_string()];
+        let ordered = apply_pinned_order(catalog.clone(), &pinned);
+        assert_eq!(ordered.len(), catalog.len(), "pinning dropped models");
+
+        let rest: Vec<&String> = ordered.iter().skip(1).map(|(id, _)| id).collect();
+        let mut sorted = rest.clone();
+        sorted.sort_unstable();
+        assert_eq!(rest, sorted, "unpinned models lost alphabetical order");
+    }
+
+    #[test]
+    fn unknown_pinned_ids_are_ignored() {
+        let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, true);
+        let catalog = registry.catalog_models();
+        let pinned = vec!["not-a-real-model".to_string(), "k3".to_string()];
+        let ordered = apply_pinned_order(catalog.clone(), &pinned);
+        assert_eq!(ordered.len(), catalog.len());
+        assert_eq!(ordered[0].0, "claude-k3");
+    }
+
+    #[test]
+    fn empty_pin_list_leaves_order_untouched() {
+        let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, true);
+        let catalog = registry.catalog_models();
+        assert_eq!(apply_pinned_order(catalog.clone(), &[]), catalog);
     }
 
     #[test]

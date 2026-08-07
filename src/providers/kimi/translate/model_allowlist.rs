@@ -2,6 +2,16 @@ use std::collections::HashMap;
 
 pub const KIMI_DEFAULT_MODEL: &str = "kimi-for-coding";
 
+/// Wire model ids the Kimi coding endpoint serves. Anything outside this list
+/// is rejected before it reaches the upstream, which answers unknown ids with
+/// a default model rather than an error — silently running the wrong model.
+pub const KIMI_WIRE_MODELS: &[&str] = &[
+    "kimi-for-coding",
+    "kimi-for-coding-highspeed",
+    "k3",
+    "k3-256k",
+];
+
 static ALIAS_TARGETS: once_cell::sync::Lazy<HashMap<&'static str, &'static str>> =
     once_cell::sync::Lazy::new(|| {
         let mut m = HashMap::new();
@@ -20,7 +30,12 @@ static ALIAS_TARGETS: once_cell::sync::Lazy<HashMap<&'static str, &'static str>>
         m
     });
 
+/// Real Kimi ids pass through untouched; Anthropic-style aliases (used when
+/// Kimi is the configured alias provider) fall back to the default model.
 pub fn resolve_model(model: &str) -> String {
+    if KIMI_WIRE_MODELS.contains(&model) {
+        return model.to_string();
+    }
     ALIAS_TARGETS
         .get(model)
         .copied()
@@ -29,7 +44,7 @@ pub fn resolve_model(model: &str) -> String {
 }
 
 pub fn assert_allowed_model(model: &str) -> Result<(), ModelNotAllowedError> {
-    if model != KIMI_DEFAULT_MODEL {
+    if !KIMI_WIRE_MODELS.contains(&model) {
         return Err(ModelNotAllowedError {
             model: model.to_string(),
         });
@@ -89,5 +104,23 @@ mod tests {
     #[test]
     fn assert_allowed_rejects_other() {
         assert!(assert_allowed_model("kimi-k2.6").is_err());
+    }
+
+    #[test]
+    fn every_wire_model_passes_through_unchanged() {
+        for model in KIMI_WIRE_MODELS {
+            assert_eq!(&resolve_model(model), model);
+            assert!(assert_allowed_model(model).is_ok(), "{model} rejected");
+        }
+    }
+
+    #[test]
+    fn k3_is_not_collapsed_to_the_coding_model() {
+        assert_eq!(resolve_model("k3"), "k3");
+        assert_eq!(resolve_model("k3-256k"), "k3-256k");
+        assert_eq!(
+            resolve_model("kimi-for-coding-highspeed"),
+            "kimi-for-coding-highspeed"
+        );
     }
 }

@@ -291,19 +291,20 @@ async fn handler_models(
             ("authMode".to_string(), json!(auth_mode)),
         ])),
     );
-    let models = state
-        .registry
-        .catalog_models()
-        .into_iter()
-        .map(|(id, provider)| {
-            json!({
-                "type": "model",
-                "id": id,
-                "display_name": provider_display_name(&provider, &id),
-                "created_at": "2026-01-01T00:00:00Z",
-            })
+    let models = crate::registry::apply_pinned_order(
+        state.registry.catalog_models(),
+        &crate::config::picker_pinned(),
+    )
+    .into_iter()
+    .map(|(id, provider)| {
+        json!({
+            "type": "model",
+            "id": id,
+            "display_name": provider_display_name(&provider, &id),
+            "created_at": "2026-01-01T00:00:00Z",
         })
-        .collect::<Vec<_>>();
+    })
+    .collect::<Vec<_>>();
     let first_id = models
         .first()
         .and_then(|model| model["id"].as_str())
@@ -695,10 +696,24 @@ fn provider_display_name(provider: &str, id: &str) -> String {
     match provider {
         "anthropic" => id.to_string(),
         "codex" => display_codex_name(id),
-        "kimi" => format!("{id} (Kimi)"),
+        "kimi" => display_kimi_name(id),
         "grok" => format!("{id} (Grok)"),
         "cursor" => format!("{id} (Cursor)"),
         _ => id.to_string(),
+    }
+}
+
+/// Human-readable picker label for a Kimi model. The upstream ids say nothing
+/// about which generation they are (`kimi-for-coding` is K2.7), so the labels
+/// come from the `display_name` the Kimi models endpoint reports, plus the
+/// context window, which is the main reason to pick one over another.
+fn display_kimi_name(id: &str) -> String {
+    match normalize_incoming_model(id).as_str() {
+        "kimi-for-coding" => "Kimi K2.7 Coding (256K)".to_string(),
+        "kimi-for-coding-highspeed" => "Kimi K2.7 Coding Highspeed (256K)".to_string(),
+        "k3" => "Kimi K3 (1M)".to_string(),
+        "k3-256k" => "Kimi K3 (256K)".to_string(),
+        other => format!("{other} (Kimi)"),
     }
 }
 
@@ -711,16 +726,18 @@ fn provider_display_name(provider: &str, id: &str) -> String {
 /// `base_url` must exactly match the `ANTHROPIC_BASE_URL` Claude Code runs
 /// with, and `fetched_at_ms` is a Unix timestamp in milliseconds.
 pub fn picker_cache_json(registry: &Registry, base_url: &str, fetched_at_ms: u64) -> Value {
-    let models = registry
-        .catalog_models()
-        .into_iter()
-        .map(|(id, provider)| {
-            json!({
-                "id": id,
-                "display_name": provider_display_name(&provider, &id),
-            })
+    let models = crate::registry::apply_pinned_order(
+        registry.catalog_models(),
+        &crate::config::picker_pinned(),
+    )
+    .into_iter()
+    .map(|(id, provider)| {
+        json!({
+            "id": id,
+            "display_name": provider_display_name(&provider, &id),
         })
-        .collect::<Vec<_>>();
+    })
+    .collect::<Vec<_>>();
     json!({
         "baseUrl": base_url,
         "fetchedAt": fetched_at_ms,

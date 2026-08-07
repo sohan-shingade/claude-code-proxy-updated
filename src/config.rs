@@ -65,6 +65,8 @@ struct PickerConfig {
     pub claude_config_dirs: Option<Vec<String>>,
     #[serde(rename = "baseUrl")]
     pub base_url: Option<String>,
+    /// Picker ids to float to the top of the catalog, in the order given.
+    pub pinned: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -321,6 +323,25 @@ pub fn picker_claude_config_dirs() -> Option<Vec<PathBuf>> {
         .and_then(|file| file.picker)
         .and_then(|picker| picker.claude_config_dirs)?;
     Some(dirs.iter().map(|dir| expand_home(dir)).collect())
+}
+
+/// Model ids to float to the top of the `/model` picker, in the order given.
+/// Set via `picker.pinned` in config.json or a comma-separated
+/// `CCP_PICKER_PINNED` env override. Ids are matched after normalization, so
+/// `k3` and `claude-k3` both work. Empty means "leave the catalog sorted".
+pub fn picker_pinned() -> Vec<String> {
+    if let Ok(raw) = std::env::var("CCP_PICKER_PINNED") {
+        return raw
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    read_file_config(&paths::config_dir())
+        .and_then(|file| file.picker)
+        .and_then(|picker| picker.pinned)
+        .unwrap_or_default()
 }
 
 fn expand_home(raw: &str) -> PathBuf {
