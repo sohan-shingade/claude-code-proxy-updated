@@ -49,6 +49,9 @@ pub(crate) const CODEX_MODELS: &[&str] = &[
 pub(crate) const CODEX_MODEL_ALIASES: &[&str] = &["gpt-5", "gpt-5-mini", "gpt-5-codex"];
 
 pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "k2.6"];
+/// The Kimi aliases all collapse to the same wire model, so only the canonical
+/// id earns a picker entry; the rest stay routable when typed explicitly.
+pub(crate) const KIMI_PICKER_MODELS: &[&str] = &["kimi-for-coding"];
 pub(crate) const GROK_MODELS: &[&str] = &["grok-composer-2.5-fast", "grok-4.5"];
 
 pub struct Registry {
@@ -172,6 +175,9 @@ impl Registry {
             .all_supported_models()
             .into_iter()
             .filter(|(model, _)| !ANTHROPIC_STYLE_ALIASES.contains(&model.as_str()))
+            .filter(|(model, provider)| {
+                provider != "kimi" || KIMI_PICKER_MODELS.contains(&model.as_str())
+            })
             .map(|(model, provider)| (discovery_model_id(&provider, &model), provider))
             .filter(|(id, _)| is_gateway_discovery_id(id))
             .collect::<Vec<_>>();
@@ -374,14 +380,17 @@ fn build_cursor_models() -> Vec<String> {
 }
 
 fn discovery_model_id(provider: &str, model: &str) -> String {
-    if provider == "codex" {
-        return codex_discovery_model_id(model);
+    match provider {
+        "codex" | "kimi" => gateway_discovery_model_id(model),
+        _ => model.to_string(),
     }
-    model.to_string()
 }
 
 fn normalize_gateway_discovery_model(model: &str) -> String {
     if let Some(raw) = codex_discovery_model_target(model) {
+        return raw.to_string();
+    }
+    if let Some(raw) = kimi_discovery_model_target(model) {
         return raw.to_string();
     }
     model.to_string()
@@ -395,21 +404,36 @@ fn is_gateway_discovery_id(model: &str) -> bool {
     model.starts_with("claude") || model.starts_with("anthropic")
 }
 
-fn codex_discovery_model_id(model: &str) -> String {
+fn gateway_discovery_model_id(model: &str) -> String {
     if model.starts_with("claude") || model.starts_with("anthropic") {
         return model.to_string();
     }
     format!("claude-{}", model.replace('.', "-"))
 }
 
-/// Reverse of `codex_discovery_model_id`, derived from the same model lists so
+/// Reverse of `gateway_discovery_model_id`, derived from the same model lists so
 /// the two directions cannot drift. Accepts both the hyphenized picker id
 /// (`claude-gpt-5-6-sol`) and the dotted spelling (`claude-gpt-5.6-sol`).
 fn codex_discovery_model_target(model: &str) -> Option<&'static str> {
     static TARGETS: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
         let mut map = HashMap::new();
         for upstream in expand_codex_models() {
-            map.insert(codex_discovery_model_id(&upstream), upstream.clone());
+            map.insert(gateway_discovery_model_id(&upstream), upstream.clone());
+            map.insert(format!("claude-{upstream}"), upstream);
+        }
+        map
+    });
+    TARGETS.get(model).map(String::as_str)
+}
+
+/// Kimi's counterpart to `codex_discovery_model_target`. Kept separate so that
+/// `is_codex_discovery_model` — which routes straight to the Codex handler —
+/// never matches a Kimi picker id.
+fn kimi_discovery_model_target(model: &str) -> Option<&'static str> {
+    static TARGETS: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+        let mut map = HashMap::new();
+        for upstream in KIMI_MODELS.iter().map(|model| (*model).to_string()) {
+            map.insert(gateway_discovery_model_id(&upstream), upstream.clone());
             map.insert(format!("claude-{upstream}"), upstream);
         }
         map
@@ -443,13 +467,52 @@ mod tests {
     #[test]
     fn every_codex_model_round_trips_through_discovery_ids() {
         for model in expand_codex_models() {
-            let picker_id = codex_discovery_model_id(&model);
+            let picker_id = gateway_discovery_model_id(&model);
             assert!(
                 picker_id.starts_with("claude"),
                 "{picker_id} would be filtered out of the /model picker"
             );
             assert_eq!(normalize_incoming_model(&picker_id), model);
         }
+    }
+
+    #[test]
+    fn every_kimi_model_round_trips_through_discovery_ids() {
+        for model in KIMI_MODELS {
+            let picker_id = gateway_discovery_model_id(model);
+            assert!(
+                picker_id.starts_with("claude"),
+                "{picker_id} would be filtered out of the /model picker"
+            );
+            assert_eq!(&normalize_incoming_model(&picker_id), model);
+        }
+    }
+
+    #[test]
+    fn kimi_picker_id_routes_to_kimi_not_codex_or_anthropic() {
+        let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, true);
+        for id in ["claude-kimi-for-coding", "claude-kimi-for-coding[1m]"] {
+            let provider = registry.provider_for_model(id, None);
+            assert_eq!(
+                provider.expect("provider").name(),
+                "kimi",
+                "{id} must reach the Kimi handler"
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_appears_once_in_the_catalog() {
+        let registry = Registry::with_anthropic_passthrough(AliasProvider::Codex, true);
+        let kimi: Vec<_> = registry
+            .catalog_models()
+            .into_iter()
+            .filter(|(_, provider)| provider == "kimi")
+            .collect();
+        assert_eq!(
+            kimi,
+            vec![("claude-kimi-for-coding".to_string(), "kimi".to_string())]
+        );
     }
 
     #[test]
