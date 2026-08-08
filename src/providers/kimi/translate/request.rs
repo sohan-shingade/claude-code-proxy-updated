@@ -42,7 +42,7 @@ pub struct KimiThinking {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum KimiToolChoice {
     Auto,
@@ -53,6 +53,26 @@ pub enum KimiToolChoice {
         kind: String,
         function: KimiToolChoiceFunction,
     },
+}
+
+/// Hand-written because the untagged derive serializes the unit variants as
+/// `null`, which the API reads as "no preference" — so `none` (never call a
+/// tool) and `required` (must call one) both silently became the default.
+impl Serialize for KimiToolChoice {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        match self {
+            KimiToolChoice::Auto => serializer.serialize_str("auto"),
+            KimiToolChoice::None => serializer.serialize_str("none"),
+            KimiToolChoice::Required => serializer.serialize_str("required"),
+            KimiToolChoice::Function { kind, function } => {
+                let mut out = serializer.serialize_struct("KimiToolChoice", 2)?;
+                out.serialize_field("type", kind)?;
+                out.serialize_field("function", function)?;
+                out.end()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +178,19 @@ pub fn translate_request(
     // Collapse auto tool_choice to None (default behavior)
     if matches!(out.tool_choice, Some(KimiToolChoice::Auto)) {
         out.tool_choice = None;
+    }
+
+    // Kimi rejects a forced tool_choice while thinking is on, and leaving
+    // `thinking` off the request is not the same as disabling it upstream — the
+    // check still fires. Turning thinking off is the only way to honor a caller
+    // that asked for a specific tool.
+    if matches!(
+        out.tool_choice,
+        Some(KimiToolChoice::Required | KimiToolChoice::Function { .. })
+    ) {
+        out.thinking = Some(KimiThinking {
+            kind: "disabled".to_string(),
+        });
     }
 
     Ok(out)
@@ -362,8 +395,11 @@ fn push_user_messages(out: &mut Vec<KimiMessage>, blocks: &[ContentBlock]) {
     flush_buffer(out, &mut buffer);
 }
 
+/// Kimi follows the OpenAI content-part shape, where every part carries a
+/// `type` discriminator. Serializing these untagged drops it, and the API
+/// rejects the whole request with "invalid part type:".
 #[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum KimiUserContentPart {
     Text { text: String },
     ImageUrl { image_url: KimiImageUrl },
@@ -426,8 +462,9 @@ fn tool_result_content(content: &Value, is_error: Option<bool>) -> Value {
     }
 }
 
+/// Same OpenAI part shape as [`KimiUserContentPart`]; see the note there.
 #[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
+#[serde(tag = "type", rename_all = "snake_case")]
 enum KimiToolResultPart {
     Text { text: String },
     ImageUrl { image_url: KimiImageUrl },
@@ -788,6 +825,86 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_parts_carry_a_type_discriminator() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "k3",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": [
+                        {"type": "text", "text": "one"},
+                        {"type": "text", "text": "two"}
+                    ]
+                }]
+            }]
+        }))
+        .unwrap();
+        let translated = translate_request(&req, TranslateOptions { session_id: None }).unwrap();
+        let wire = serde_json::to_value(&translated).unwrap();
+        let content = wire["messages"][0]["content"].clone();
+        let parts = content.as_array().expect("expected array content");
+        assert_eq!(parts.len(), 2);
+        for part in parts {
+            assert_eq!(
+                part.get("type").and_then(|v| v.as_str()),
+                Some("text"),
+                "Kimi rejects parts without a type: {part}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_image_parts_carry_a_type_discriminator() {
+        let req: MessagesRequest = serde_json::from_value(json!({
+            "model": "k3",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "what is this?"},
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="
+                    }}
+                ]
+            }]
+        }))
+        .unwrap();
+        let translated = translate_request(&req, TranslateOptions { session_id: None }).unwrap();
+        let wire = serde_json::to_value(&translated).unwrap();
+        let parts = wire["messages"][0]["content"]
+            .as_array()
+            .expect("expected array content")
+            .clone();
+        let types: Vec<&str> = parts
+            .iter()
+            .filter_map(|p| p.get("type").and_then(|v| v.as_str()))
+            .collect();
+        assert_eq!(types, vec!["text", "image_url"]);
+    }
+
+    #[test]
+    fn tool_choice_modes_serialize_as_strings_not_null() {
+        for (mode, expected) in [
+            (KimiToolChoice::None, json!("none")),
+            (KimiToolChoice::Required, json!("required")),
+            (KimiToolChoice::Auto, json!("auto")),
+        ] {
+            assert_eq!(serde_json::to_value(&mode).unwrap(), expected);
+        }
+        let explicit = KimiToolChoice::Function {
+            kind: "function".to_string(),
+            function: KimiToolChoiceFunction {
+                name: "grep".to_string(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&explicit).unwrap(),
+            json!({"type": "function", "function": {"name": "grep"}})
+        );
+    }
+
+    #[test]
     fn max_tokens_defaults_to_32000() {
         let req: MessagesRequest = serde_json::from_value(json!({
             "model": "kimi-for-coding",
@@ -861,6 +978,31 @@ mod tests {
             translated.tool_choice,
             Some(KimiToolChoice::Required)
         ));
+    }
+
+    #[test]
+    fn forced_tool_choice_disables_thinking() {
+        for (choice, expected) in [
+            (json!({"type": "any"}), "disabled"),
+            (json!({"type": "tool", "name": "search"}), "disabled"),
+            (json!({"type": "auto"}), "enabled"),
+            (json!({"type": "none"}), "enabled"),
+        ] {
+            let req: MessagesRequest = serde_json::from_value(json!({
+                "model": "kimi-for-coding",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"name":"search","input_schema":{"type":"object"}}],
+                "tool_choice": choice
+            }))
+            .unwrap();
+            let translated =
+                translate_request(&req, TranslateOptions { session_id: None }).unwrap();
+            assert_eq!(
+                translated.thinking.as_ref().map(|t| t.kind.as_str()),
+                Some(expected),
+                "tool_choice {choice} should send thinking={expected}"
+            );
+        }
     }
 
     #[test]
